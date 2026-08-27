@@ -1,0 +1,9 @@
+# .dockerignore — что не попадает в Docker-образ
+.env
+.venv
+__pycache__
+*.pyc
+.git
+.gitignore
+*.log
+deploy

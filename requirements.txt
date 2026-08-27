@@ -1,0 +1,7 @@
+pybotx>=0.30.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+python-dotenv>=1.0.0
