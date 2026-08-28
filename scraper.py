@@ -352,13 +352,17 @@ def run_scrape() -> tuple[list[dict], list[dict], list[dict]]:
     if not current:
         raise RuntimeError("Не удалось получить список релизов")
 
+    # Загружаем предыдущий CSV ДО сохранения текущего
+    prev_path = latest_csv()
+    prev = load_csv(prev_path) if prev_path else []
+
+    # Сохраняем текущий CSV
     save_csv(current)
 
-    prev_path = last_csv()
-    if prev_path is None:
+    # Сравниваем с предыдущим (включая сегодняшний, если он был)
+    if not prev:
         return current, current, []
 
-    prev = load_csv(prev_path)
     prev_hashes = {r["hash"] for r in prev}
     curr_hashes = {r["hash"] for r in current}
 
