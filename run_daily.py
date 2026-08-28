@@ -20,7 +20,21 @@ async def main():
     try:
         all_rows, new_rows, removed_rows = await asyncio.to_thread(run_scrape)
     except Exception as e:
-        print(f"❌ Ошибка скрапинга: {e}")
+        error_msg = f"❌ Ошибка скрапинга: {e}"
+        print(error_msg)
+        # Отправляем ошибку в чат
+        try:
+            b = get_bot()
+            await b.startup()
+            await b.send_message(
+                bot_id=UUID(BOT_ID),
+                chat_id=UUID(CHAT_ID),
+                body=error_msg,
+                wait_callback=False
+            )
+            await b.shutdown()
+        except Exception as send_err:
+            print(f"Не удалось отправить ошибку в чат: {send_err}")
         return 1
     print(f"   Скрапинг занял {time.time()-t0:.1f}s")
     print(f"   Всего строк: {len(all_rows)} | Новых: {len(new_rows)} | Удалено: {len(removed_rows)}")
