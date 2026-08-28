@@ -63,12 +63,13 @@ async def main():
         print("❌ Нет данных — прерываю")
         return 1
 
-    # Формируем сообщение
-    if new_rows or removed_rows:
-        text = format_changes(new_rows, removed_rows)
-    else:
-        text = "✅ Изменений на releases.1c.ru нет."
+    # Отправляем в чат только если есть изменения
+    if not new_rows and not removed_rows:
+        print("✅ Изменений нет — не отправляю в чат")
+        return 0
 
+    # Формируем сообщение
+    text = format_changes(new_rows, removed_rows)
     body = text
 
     # Отправка в чат (дробление по 4000 символов)
