@@ -15,12 +15,30 @@ async def main():
     from formatter import format_changes
     from bot import get_bot
 
+    MAX_RETRIES = 3
+    RETRY_DELAY = 300  # 5 минут
+
     t0 = time.time()
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔍 Запускаю полный цикл скрапинга...")
-    try:
-        all_rows, new_rows, removed_rows = await asyncio.to_thread(run_scrape)
-    except Exception as e:
-        error_msg = f"❌ Ошибка скрапинга: {e}"
+
+    all_rows, new_rows, removed_rows = None, None, None
+    last_error = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            all_rows, new_rows, removed_rows = await asyncio.to_thread(run_scrape)
+            break  # Успех — выходим из цикла
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_RETRIES:
+                print(f"⚠️ Попытка {attempt}/{MAX_RETRIES} не удалась: {e}")
+                print(f"   Жду {RETRY_DELAY // 60} минут перед повтором...")
+                await asyncio.sleep(RETRY_DELAY)
+            else:
+                print(f"❌ Все {MAX_RETRIES} попытки не удались")
+
+    if all_rows is None:
+        error_msg = f"❌ Ошибка скрапинга после {MAX_RETRIES} попыток: {last_error}"
         print(error_msg)
         # Отправляем ошибку в чат
         try:
@@ -36,6 +54,8 @@ async def main():
         except Exception as send_err:
             print(f"Не удалось отправить ошибку в чат: {send_err}")
         return 1
+
+    assert new_rows is not None and removed_rows is not None
     print(f"   Скрапинг занял {time.time()-t0:.1f}s")
     print(f"   Всего строк: {len(all_rows)} | Новых: {len(new_rows)} | Удалено: {len(removed_rows)}")
 
