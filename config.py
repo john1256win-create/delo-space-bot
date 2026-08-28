@@ -21,6 +21,9 @@ ITS_PASSWORD = os.getenv("ITS_PASSWORD", "")
 # Куда слать уведомления (ID чата в Delo Space)
 CHAT_ID = os.getenv("CHAT_ID", "")
 
+# Мониторинг v8.1c.ru/lawmonitor (временное решение)
+ENABLE_LAWMONITOR = os.getenv("ENABLE_LAWMONITOR", "true").lower() == "true"
+
 # Пути
 DATA_DIR = HERE / "data"
 OUT_DIR = HERE / "output"

@@ -104,3 +104,29 @@ def format_error(message: str) -> str:
 def format_success(message: str) -> str:
     """Форматирует успешное сообщение."""
     return f"✅ {message}"
+
+
+def format_law_monitor_changes(new_rows: list[dict], removed_rows: list[dict]) -> str:
+    """Форматирует изменения мониторинга законодательства v8.1c.ru/lawmonitor."""
+    today = datetime.now().strftime("%d.%m.%Y")
+    parts = [f"📜 Изменения в мониторинге законодательства — {today}\n"]
+
+    if new_rows:
+        parts.append(f"🆕 Новые записи ({len(new_rows)}):")
+        for row in new_rows:
+            product = row.get("product", "")
+            status = row.get("status", "")
+            details = row.get("details", "")
+            parts.append(f"\n📋 {product}")
+            parts.append(f"   {status}")
+            if details:
+                parts.append(f"   {details}")
+
+    if removed_rows:
+        parts.append(f"\n🗑 Удалено ({len(removed_rows)}):")
+        for row in removed_rows[:10]:
+            parts.append(f"  - {row.get('product', '')} ({row.get('status', '')})")
+        if len(removed_rows) > 10:
+            parts.append(f"  ... и ещё {len(removed_rows) - 10}")
+
+    return "\n".join(parts)

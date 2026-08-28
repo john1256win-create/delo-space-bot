@@ -14,7 +14,8 @@ async def main():
     from scraper import run_scrape
     from formatter import format_changes
     from bot import get_bot
-
+    from config import ENABLE_LAWMONITOR
+    
     MAX_RETRIES = 3
     RETRY_DELAY = 300  # 5 минут
 
@@ -66,35 +67,65 @@ async def main():
     # Отправляем в чат только если есть изменения
     if not new_rows and not removed_rows:
         print("✅ Изменений нет — не отправляю в чат")
-        return 0
+    else:
+        # Формируем сообщение
+        text = format_changes(new_rows, removed_rows)
+        body = text
 
-    # Формируем сообщение
-    text = format_changes(new_rows, removed_rows)
-    body = text
-
-    # Отправка в чат (дробление по 4000 символов)
-    b = get_bot()
-    await b.startup()
-    try:
-        chunk = body
-        size = 4000
-        sent = 0
-        while chunk:
-            part = chunk[:size]
-            if len(chunk) > size:
-                cut = part.rfind("\n")
-                if cut > 0:
-                    part, chunk = chunk[:cut], chunk[cut:].lstrip()
+        # Отправка в чат (дробление по 4000 символов)
+        b = get_bot()
+        await b.startup()
+        try:
+            chunk = body
+            size = 4000
+            sent = 0
+            while chunk:
+                part = chunk[:size]
+                if len(chunk) > size:
+                    cut = part.rfind("\n")
+                    if cut > 0:
+                        part, chunk = chunk[:cut], chunk[cut:].lstrip()
+                    else:
+                        chunk = chunk[size:].lstrip()
                 else:
-                    chunk = chunk[size:].lstrip()
+                    chunk = ""
+                await b.send_message(bot_id=UUID(BOT_ID), chat_id=UUID(CHAT_ID),
+                                     body=part, wait_callback=False)
+                sent += 1
+            print(f"✅ Отправлено в чат {CHAT_ID} частей: {sent}")
+        finally:
+            await b.shutdown()
+    
+    # Мониторинг v8.1c.ru/lawmonitor (временное решение)
+    if ENABLE_LAWMONITOR:
+        print("\n📜 Запускаю мониторинг v8.1c.ru/lawmonitor...")
+        try:
+            from scraper_lawmonitor import run_law_monitor_scrape
+            from formatter import format_law_monitor_changes
+            
+            lm_all, lm_new, lm_removed = await asyncio.to_thread(run_law_monitor_scrape)
+            print(f"   LawMonitor: всего={len(lm_all)} | новых={len(lm_new)} | удалено={len(lm_removed)}")
+            
+            if lm_new or lm_removed:
+                lm_text = format_law_monitor_changes(lm_new, lm_removed)
+                b = get_bot()
+                await b.startup()
+                try:
+                    await b.send_message(
+                        bot_id=UUID(BOT_ID),
+                        chat_id=UUID(CHAT_ID),
+                        body=lm_text,
+                        wait_callback=False
+                    )
+                    print(f"✅ LawMonitor изменения отправлены в чат")
+                finally:
+                    await b.shutdown()
             else:
-                chunk = ""
-            await b.send_message(bot_id=UUID(BOT_ID), chat_id=UUID(CHAT_ID),
-                                 body=part, wait_callback=False)
-            sent += 1
-        print(f"✅ Отправлено в чат {CHAT_ID} частей: {sent}")
-    finally:
-        await b.shutdown()
+                print("✅ LawMonitor: изменений нет")
+        except Exception as e:
+            print(f"⚠️ Ошибка LawMonitor: {e}")
+            # Не прерываем выполнение, просто логируем
+    
     return 0
 
 rc = asyncio.run(main())
