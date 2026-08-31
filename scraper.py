@@ -20,9 +20,29 @@ from config import CRED_FILE, COOKIE_FILE, OUT_DIR, ITS_USERNAME, ITS_PASSWORD
 # ── константы ──────────────────────────────────────────────
 LOGIN_URL = "https://login.1c.ru/login"
 LOGIN_SERVICE = "https://releases.1c.ru/public/security_check"
-TOTAL_URL = "https://releases.1c.ru/total"
+TOTAL_URL = "https://releases.1c.ru/total?hideUnavailablePrograms=false"
 TIMEOUT = 45
 MAX_RETRIES = 3
+
+# Фильтр по конфигурациям (точное совпадение названий)
+TRACKED_PRODUCTS = [
+    "Мобильная платформа 1С:Предприятия 8.3",
+    "Мобильная платформа 1С:Предприятия 8.5",
+    "Технологическая платформа 8.3",
+    "Технологическая платформа 8.5",
+    "1С:ERP Управление предприятием 2",
+    "1С:Управление холдингом 3.3",
+    "1С:MDM Управление нормативно-справочной информацией, редакция 2.5",
+    "Бухгалтерия предприятия КОРП, редакция 3.0",
+    "Документооборот КОРП, редакция 2.1",
+    "Документооборот КОРП, редакция 3.0",
+    "Документооборот ПРОФ, редакция 2.1",
+    "Документооборот ПРОФ, редакция 3.0",
+    "Зарплата и управление персоналом КОРП, редакция 3",
+    "Налоговый мониторинг для \"1С:ERP. Управления предприятием\"",
+    "ГНИВЦ:Налоговый мониторинг (версия 2026г)",
+    "ГНИВЦ:Налоговый мониторинг (версия 2027г)",
+]
 
 CSV_COLUMNS = [
     "product", "group", "version", "title", "date", "type_rel", "url", "hash",
@@ -198,6 +218,11 @@ def parse_releases(soup: BeautifulSoup) -> list[dict]:
             continue
 
         product_name = tds[0].get_text(strip=True)
+        
+        # Фильтрация по TRACKED_PRODUCTS (точное совпадение)
+        if product_name not in TRACKED_PRODUCTS:
+            continue
+        
         project_url = ""
         for a in tds[0].find_all("a"):
             href = a.get("href", "")
