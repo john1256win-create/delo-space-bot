@@ -22,6 +22,7 @@ from pybotx import (
 from config import BOT_ID, CTS_URL, SECRET_KEY, CHAT_ID
 from scraper import run_scrape, query_product
 from formatter import format_changes, format_product_info, format_full_report
+import message_store
 
 # Настройка логирования
 logging.basicConfig(
@@ -117,6 +118,7 @@ async def help_handler(message: IncomingMessage, bot: Bot) -> None:
 /check — проверить изменения релизов
 /report — полная сводка по всем продуктам
 /query <название> — найти продукт
+/chat_id — получить ID текущего чата
 /help — эта справка
 
 Примеры:
@@ -124,6 +126,39 @@ async def help_handler(message: IncomingMessage, bot: Bot) -> None:
 /query Документооборот
 """
     await bot.answer_message(help_text)
+
+
+@collector.command("/chat_id", description="Получить ID текущего чата")
+async def chat_id_handler(message: IncomingMessage, bot: Bot) -> None:
+    """Возвращает chat_id текущего чата."""
+    chat_id = message.chat.id
+    chat_type = getattr(message.chat, "type", "unknown")
+    await bot.answer_message(f"📌 Chat ID: `{chat_id}`\nТип чата: {chat_type}")
+
+
+@collector.default_message_handler
+async def store_all_messages(message: IncomingMessage, bot: Bot) -> None:
+    """Сохраняет все входящие сообщения в SQLite-хранилище."""
+    try:
+        chat_id = str(message.chat.id)
+        chat_type = getattr(message.chat, "type", "unknown")
+        sender_id = str(getattr(message.sender, "huid", "") or getattr(message.sender, "udid", ""))
+        sender_name = getattr(message.sender, "username", "") or ""
+        body = message.body or ""
+
+        saved = message_store.store_message(
+            sync_id=str(message.sync_id),
+            chat_id=chat_id,
+            chat_type=chat_type,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            body=body,
+            command=None,
+        )
+        if saved:
+            logger.info(f"📥 Сообщение от {sender_name} сохранено (chat {chat_id})")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения сообщения: {e}")
 
 
 @collector.chat_created
@@ -246,6 +281,29 @@ async def status_handler(request: Request) -> JSONResponse:
         request_headers=request.headers,
     )
     return JSONResponse(status)
+
+
+@app.get("/messages")
+async def list_messages_handler(chat_id: str = "", limit: int = 100) -> JSONResponse:
+    """Возвращает сохранённые сообщения из хранилища (для чтения с ПК via VPN)."""
+    messages = message_store.list_messages(
+        chat_id=chat_id or None,
+        limit=min(limit, 500),
+    )
+    return JSONResponse({
+        "total": message_store.count_messages(),
+        "count": len(messages),
+        "messages": messages,
+    })
+
+
+@app.get("/messages/{message_id}")
+async def get_message_handler(message_id: int) -> JSONResponse:
+    """Возвращает одно сообщение по ID."""
+    msg = message_store.get_message(message_id)
+    if msg is None:
+        return JSONResponse({"error": "Message not found"}, status_code=404)
+    return JSONResponse(msg)
 
 
 @app.post("/notification/callback")
