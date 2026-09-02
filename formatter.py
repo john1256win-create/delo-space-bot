@@ -34,6 +34,50 @@ def format_changes(new_rows: list[dict], removed_rows: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def format_changes_tg(new_rows: list[dict], removed_rows: list[dict]) -> str:
+    """
+    Форматирует изменения для Telegram (HTML-ссылки).
+    Номер релиза — гиперссылка на страницу релиза.
+    Нужен row['url'] для построения ссылки на версию.
+    """
+    from release_files import version_url
+
+    today = datetime.now().strftime("%d.%m.%Y")
+    parts = [f"<b>📢 Изменения на releases.1c.ru — {today}</b>\n"]
+
+    if new_rows:
+        parts.append(f"🆕 <b>Новые/обновлённые ({len(new_rows)}):</b>")
+        by_product = {}
+        for row in new_rows:
+            key = row["product"]
+            if key not in by_product:
+                by_product[key] = []
+            by_product[key].append(row)
+
+        for product, rows in sorted(by_product.items()):
+            parts.append(f"\n<b>{product}</b>")
+            for row in rows:
+                ver = row["version"]
+                ver_type = row["title"]
+                date = row["date"]
+                vurl = version_url(row)
+                if vurl:
+                    # HTML-ссылка в Telegram
+                    ver_link = f'<a href="{vurl}">{ver}</a>'
+                else:
+                    ver_link = ver
+                parts.append(f"  - {ver_type}: {ver_link} ({date})")
+
+    if removed_rows:
+        parts.append(f"\n🗑 <b>Удалено ({len(removed_rows)}):</b>")
+        for row in removed_rows[:10]:
+            parts.append(f"  - {row['product']} — {row['version']}")
+        if len(removed_rows) > 10:
+            parts.append(f"  ... и ещё {len(removed_rows) - 10}")
+
+    return "\n".join(parts)
+
+
 def format_full_report(all_rows: list[dict]) -> str:
     """Форматирует полную сводку по всем продуктам — без HTML."""
     today = datetime.now().strftime("%d.%m.%Y")

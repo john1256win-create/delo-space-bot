@@ -68,33 +68,24 @@ async def main():
     if not new_rows and not removed_rows:
         print("✅ Изменений нет — не отправляю в чат")
     else:
-        # Формируем сообщение
-        text = format_changes(new_rows, removed_rows)
-        body = text
+        # ── ВРЕМЕННО: отправка в Telegram вместо Delo Space ──
+        # Формируем сообщение с гиперссылками (HTML)
+        from formatter import format_changes_tg
+        from telegram_send import send_message, send_document
+        from release_files import download_all_news_files
 
-        # Отправка в чат (дробление по 4000 символов)
-        b = get_bot()
-        await b.startup()
-        try:
-            chunk = body
-            size = 4000
-            sent = 0
-            while chunk:
-                part = chunk[:size]
-                if len(chunk) > size:
-                    cut = part.rfind("\n")
-                    if cut > 0:
-                        part, chunk = chunk[:cut], chunk[cut:].lstrip()
-                    else:
-                        chunk = chunk[size:].lstrip()
-                else:
-                    chunk = ""
-                await b.send_message(bot_id=UUID(BOT_ID), chat_id=UUID(CHAT_ID),
-                                     body=part, wait_callback=False)
-                sent += 1
-            print(f"✅ Отправлено в чат {CHAT_ID} частей: {sent}")
-        finally:
-            await b.shutdown()
+        text = format_changes_tg(new_rows, removed_rows)
+        ok = send_message(text, parse_mode="HTML")
+        print(f"{'✅' if ok else '❌'} Отправлено в Telegram: {len(text)} символов")
+
+        # Скачиваем и прикрепляем файлы «Новое в версии» для новых релизов
+        if new_rows:
+            print(f"   📎 Скачиваю «Новое в версии» для {len(new_rows)} релизов...")
+            files = download_all_news_files(new_rows)
+            for fp in files:
+                cap = f"Новое в версии: {fp.name}"
+                doc_ok = send_document(str(fp), caption=cap)
+                print(f"   {'✅' if doc_ok else '❌'} Файл {fp.name} отправлен")
     
     # Мониторинг v8.1c.ru/lawmonitor (временное решение)
     if ENABLE_LAWMONITOR:

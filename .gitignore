@@ -18,6 +18,7 @@ cookies.json
 # Данные
 output/
 data/
+downloads/
 *.csv
 
 # IDE
