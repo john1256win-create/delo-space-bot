@@ -21,15 +21,27 @@ from bs4 import BeautifulSoup
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 
 
+def _clean_version(version: str) -> str:
+    """
+    Убирает буквенные суффиксы из номера версии для построения URL.
+    Пример: '3.1.38.92ДП' -> '3.1.38.92'
+    На странице релиза номер указан без суффикса.
+    """
+    import re
+    # Оставляем только числовые части и точки: убираем не-цифровой хвост
+    m = re.match(r'^([\d.]+)', version)
+    return m.group(1).rstrip('.') if m else version
+
+
 def version_url(row: dict) -> str:
     """
     Строит URL страницы релиза из row.
     row['url'] = https://releases.1c.ru/project/EnterpriseERP20
-    row['version'] = 2.5.27.81
+    row['version'] = 2.5.27.81ДП
     -> https://releases.1c.ru/version_files?nick=EnterpriseERP20&ver=2.5.27.81
     """
     project_url = row.get("url", "")
-    version = row.get("version", "")
+    version = _clean_version(row.get("version", ""))
     if not project_url or not version:
         return ""
     # nick = последний сегмент project URL

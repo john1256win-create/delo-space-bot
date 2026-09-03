@@ -8,7 +8,8 @@ sys.path.insert(0, "/Users/salnikov/ТЗ_Проекты/_Инструменты/
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 BOT_ID = "d2863b44-7aee-5a07-bc4c-9a6098b5696e"
-CHAT_ID = "5bf9bf2e-49eb-5099-85e4-1af65241a3b8"
+# Канал «Релизы 1С» — куда бот отправляет уведомления о релизах
+CHAT_ID = "23f62f30-5917-5510-8401-72c9a6df5181"
 
 async def main():
     from scraper import run_scrape
