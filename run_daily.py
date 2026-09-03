@@ -68,15 +68,21 @@ async def main():
     if not new_rows and not removed_rows:
         print("✅ Изменений нет — не отправляю в чат")
     else:
-        # Отправка в Delo Space
-        from formatter import format_changes
-        text = format_changes(new_rows, removed_rows)
+        # Отправка в Delo Space: гиперссылки + файлы «Новое в версии»
+        from formatter import format_changes_links
+        from release_files import download_all_news_files
+        from pybotx import OutgoingAttachment
+
+        text = format_changes_links(new_rows, removed_rows)
         body = text
 
-        # Отправка в чат (дробление по 4000 символов)
         b = get_bot()
         await b.startup()
         try:
+            # 1) Скачиваем файлы «Новое в версии» для новых релизов
+            files = download_all_news_files(new_rows) if new_rows else []
+
+            # 2) Отправляем текстовое сообщение с гиперссылками (дробление по 4000)
             chunk = body
             size = 4000
             sent = 0
@@ -94,6 +100,22 @@ async def main():
                                      body=part, wait_callback=False)
                 sent += 1
             print(f"✅ Отправлено в чат {CHAT_ID} частей: {sent}")
+
+            # 3) Прикрепляем файлы «Новое в версии»
+            for fp in files:
+                try:
+                    with open(fp, "rb") as f:
+                        attachment = OutgoingAttachment(content=f.read(), filename=fp.name)
+                    await b.send_message(
+                        bot_id=UUID(BOT_ID),
+                        chat_id=UUID(CHAT_ID),
+                        body=f"📎 {fp.name}",
+                        file=attachment,
+                        wait_callback=False,
+                    )
+                    print(f"   ✅ Файл отправлен: {fp.name}")
+                except Exception as fe:
+                    print(f"   ❌ Ошибка отправки файла {fp.name}: {fe}")
         finally:
             await b.shutdown()
     

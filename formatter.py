@@ -78,6 +78,50 @@ def format_changes_tg(new_rows: list[dict], removed_rows: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def format_changes_links(new_rows: list[dict], removed_rows: list[dict]) -> str:
+    """
+    Форматирует изменения для Delo Space с markdown-гиперссылками на версии.
+    Delo Space не рендерит HTML-теги, но поддерживает markdown-ссылки [текст](url).
+    Номер релиза — кликабельная ссылка на страницу релиза.
+    """
+    from release_files import version_url
+
+    today = datetime.now().strftime("%d.%m.%Y")
+    parts = [f"📢 Изменения на releases.1c.ru — {today}\n"]
+
+    if new_rows:
+        parts.append(f"🆕 Новые/обновлённые ({len(new_rows)}):")
+        by_product = {}
+        for row in new_rows:
+            key = row["product"]
+            if key not in by_product:
+                by_product[key] = []
+            by_product[key].append(row)
+
+        for product, rows in sorted(by_product.items()):
+            parts.append(f"\n{product}")
+            for row in rows:
+                ver = row["version"]
+                ver_type = row["title"]
+                date = row["date"]
+                vurl = version_url(row)
+                if vurl:
+                    # markdown-ссылка для Delo Space
+                    ver_link = f"[{ver}]({vurl})"
+                else:
+                    ver_link = ver
+                parts.append(f"  - {ver_type}: {ver_link} ({date})")
+
+    if removed_rows:
+        parts.append(f"\n🗑 Удалено ({len(removed_rows)}):")
+        for row in removed_rows[:10]:
+            parts.append(f"  - {row['product']} — {row['version']}")
+        if len(removed_rows) > 10:
+            parts.append(f"  ... и ещё {len(removed_rows) - 10}")
+
+    return "\n".join(parts)
+
+
 def format_full_report(all_rows: list[dict]) -> str:
     """Форматирует полную сводку по всем продуктам — без HTML."""
     today = datetime.now().strftime("%d.%m.%Y")

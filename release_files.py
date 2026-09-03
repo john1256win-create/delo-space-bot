@@ -50,13 +50,39 @@ def version_url(row: dict) -> str:
 
 
 def _get_session() -> requests.Session:
-    """Возвращает авторизованную сессию."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
-    })
+    """Возвращает авторизованную сессию с гарантированным доступом к страницам версий."""
+    import os as _os
+
+    def _make_session() -> requests.Session:
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        })
+        return s
+
+    session = _make_session()
     if not scraper.auth(session):
         raise RuntimeError("Не удалось авторизоваться на releases.1c.ru")
+
+    # Проверяем реальный доступ к странице версии: если auth вернул True
+    # по старым cookies, а они протухли для version_files — редирект на login.
+    probe = session.get(
+        "https://releases.1c.ru/version_files?nick=HRMCorp30&ver=3.1.38.92",
+        timeout=45, allow_redirects=False,
+    )
+    if probe.status_code in (301, 302) and "login" in (probe.headers.get("Location", "")):
+        # cookies протухли — сбрасываем и логинимся заново
+        _os.remove(scraper.COOKIE_FILE) if _os.path.exists(scraper.COOKIE_FILE) else None
+        session = _make_session()
+        if not scraper.auth(session):
+            raise RuntimeError("Не удалось авторизоваться на releases.1c.ru (после сброса cookies)")
+        probe2 = session.get(
+            "https://releases.1c.ru/version_files?nick=HRMCorp30&ver=3.1.38.92",
+            timeout=45, allow_redirects=False,
+        )
+        if probe2.status_code in (301, 302):
+            raise RuntimeError("Не удалось получить доступ к страницам версии после повторного логина")
+
     return session
 
 
