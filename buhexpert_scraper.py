@@ -263,14 +263,92 @@ def fetch_event_content(session: requests.Session, url: str) -> str:
         main = soup.find(class_="main-content-inner")
         if not main:
             return ""
-        txt = main.get_text(" ", strip=True)
+        txt = _extract_block_text(main)
         # убираем служебные надписи подписки
         txt = re.sub(r"У вас нет доступа[^.]*", "", txt)
         txt = re.sub(r"Чтобы получить доступ[^.]*подписку", "", txt)
-        txt = re.sub(r"\s+", " ", txt).strip()
+        # Обрезаем всё, начиная с блока комментариев
+        for marker in ("Возможность задать вопрос", "Комментарии закрыты", "Добавить файлы"):
+            idx = txt.find(marker)
+            if idx > 0:
+                txt = txt[:idx]
+        txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
         return txt
     except Exception:
         return ""
+
+
+def _extract_block_text(root) -> str:
+    """
+    Извлекает текст из контента, сохраняя переносы строк.
+    Каждый блочный элемент (заголовок, пункт списка, абзац) — с новой строки.
+    Вложенные списки/пункты тоже дают свои строки (иерархия через дефисы).
+    Пропускает script/style и служебные блоки (комментарии, навигация).
+    """
+    skip_tags = {"script", "style", "noscript"}
+    # Строки, которые не являются контентом события
+    noise_patterns = [
+        r"^#\w+$",                       # #main, #comments, #primary
+        r"^#?[\w-]*\s*row start",           # служебные маркеры темы (с #main или без)
+        r"^\s*end\s*-+",
+        r"^jQuery\(document\)",
+        r"^document\.addEventListener",
+        r"^Задайте свой вопрос",
+        r"^Перед написанием вопроса",
+        r"^Голосуйте с помощью",
+        r"^Комментарии закрыты",
+        r"^Добавить комментарий",
+        r"^Обсуждение",
+        r"^Войдите, чтобы оставить комментарий",
+        r"^Возможность задать вопрос",
+        r"^Добавить файлы",
+        r"^Файлы не выбраны",
+        r"^Допустимые расширения",
+        r"^Чтобы выбрать несколько файлов",
+        r"^Вложения будут видны",
+        r"^Комментарий",
+        r"^Максимальный размер файла",
+        r"^\*$",                         # одиночная звёздочка (маркер формы)
+        r"^У вас нет доступа",
+        r"^Чтобы получить доступ",
+    ]
+    block_tags = {"h1", "h2", "h3", "h4", "h5", "h6", "li"}
+    out_lines = []
+
+    def walk(node):
+        for child in node.children:
+            name = getattr(child, "name", None)
+            if name is None:
+                txt = str(child).strip()
+                if txt:
+                    out_lines.append(txt)
+                continue
+            if name in skip_tags:
+                continue
+            if name in block_tags:
+                # для li/h1-h6/p берём полный текст один раз (не рекурсивно),
+                # чтобы не дублировать текст вложенных <a>/<span>
+                full = re.sub(r"\s+", " ", child.get_text(" ", strip=True)).strip()
+                if full:
+                    prefix = "- " if name == "li" else ""
+                    out_lines.append(prefix + full)
+                # НЕ заходим рекурсивно в li/h1-h6 — их текст уже взят
+            else:
+                walk(child)
+
+    walk(root)
+
+    cleaned = []
+    for line in out_lines:
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+        if any(re.match(p, line) for p in noise_patterns):
+            continue
+        if cleaned and cleaned[-1] == line:
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
 
 
 def init_db():
