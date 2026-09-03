@@ -174,7 +174,7 @@ def format_milestone_message(release: str, milestone_name: str, counter: Counter
         if parts:
             lines.append("")
             lines.append("📊 Задачи по статусам:")
-            lines.append(", ".join(parts))
+            lines.extend(parts)
 
     return "\n".join(lines)
 
