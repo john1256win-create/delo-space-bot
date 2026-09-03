@@ -42,7 +42,7 @@ async def main():
             # 2. Контент события (полный текст)
             content = bsend.get_event_content_for(sem)
             if content:
-                header = f"📄 Содержание события: {sem['title']}\n"
+                header = f"{sem['title']}\n"
                 await bsend.send_message(header + content, bot=b)
                 print(f"[бухэксперт:daily]   ✅ Контент ({len(content)} символов)")
             else:
