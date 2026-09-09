@@ -4,7 +4,7 @@ buhexpert_scraper.py — сбор семинаров с buhexpert8.ru.
 Возможности:
 - Парсинг полного списка будущих семинаров (#seminars-list2) с пагинацией.
 - Авторизация (платная подписка) для доступа к полному тексту контента события.
-- Извлечение контента события (div.main-content-inner).
+- Извлечение контента события (div#seminar-program).
 - Хранение семинаров в SQLite (data/buhexpert_seminars.db).
 
 Структура данных семинара:
@@ -256,11 +256,11 @@ def fetch_seminars(session: requests.Session = None) -> list[dict]:
 
 
 def fetch_event_content(session: requests.Session, url: str) -> str:
-    """Извлекает полный текст контента события (div.main-content-inner)."""
+    """Извлекает полный текст контента события (div#seminar-program)."""
     try:
         r = session.get(url, timeout=30)
         soup = BeautifulSoup(r.text, "html.parser")
-        main = soup.find(class_="main-content-inner")
+        main = soup.find(id="seminar-program") or soup.find(class_="seminar-program")
         if not main:
             return ""
         txt = _extract_block_text(main)
