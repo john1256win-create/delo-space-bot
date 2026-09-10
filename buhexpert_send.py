@@ -52,8 +52,13 @@ def format_reminder(seminar: dict) -> str:
     return (f"⏰ Напоминание! Завтра семинар:\n{fmt_seminar(seminar)}")
 
 
-async def send_message(body: str, bot=None, chat_id: UUID = CHAT_BUHEXPERT):
-    """Отправляет текст в канал БухЭксперт. Если bot не передан — создаёт/закрывает."""
+async def send_message(body: str, bot=None, chat_id: UUID = CHAT_BUHEXPERT,
+                       retries: int = 3, retry_delay: float = 5.0):
+    """Отправляет текст в канал БухЭксперт. Если bot не передан — создаёт/закрывает.
+
+    При сетевом сбое (ConnectTimeout и т.п.) повторяет отправку до `retries` раз
+    с паузой `retry_delay` секунд, чтобы разовый таймаут не терял напоминание.
+    """
     from bot import get_bot
     own_bot = bot is None
     if own_bot:
@@ -72,8 +77,22 @@ async def send_message(body: str, bot=None, chat_id: UUID = CHAT_BUHEXPERT):
                     chunk = chunk[size:].lstrip()
             else:
                 chunk = ""
-            await bot.send_message(bot_id=UUID(BOT_ID), chat_id=chat_id,
-                                   body=part, wait_callback=False)
+            # Отправка с повторами при сетевом сбое
+            last_exc = None
+            for attempt in range(1, retries + 1):
+                try:
+                    await bot.send_message(bot_id=UUID(BOT_ID), chat_id=chat_id,
+                                           body=part, wait_callback=False)
+                    last_exc = None
+                    break
+                except Exception as e:
+                    last_exc = e
+                    if attempt < retries:
+                        print(f"[бухэксперт:send] ⚠ Сбой отправки (попытка {attempt}/{retries}): "
+                              f"{type(e).__name__}: {e}. Повтор через {retry_delay}с...")
+                        await asyncio.sleep(retry_delay)
+            if last_exc is not None:
+                raise last_exc
     finally:
         if own_bot:
             await bot.shutdown()
