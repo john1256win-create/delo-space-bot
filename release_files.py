@@ -186,6 +186,7 @@ def download_news(session: requests.Session, row: dict) -> tuple[Optional[Path],
         if pdf_bytes:
             pdf_path = filepath.with_suffix(".pdf")
             pdf_path.write_bytes(pdf_bytes)
+            filepath.unlink(missing_ok=True)  # промежуточный .htm больше не нужен
             return pdf_path, False
         print(f"   ⚠ PDF не собран из {filepath.name} — отправляю HTML")
 
