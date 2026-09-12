@@ -6,13 +6,15 @@ run_buhexpert_news.py — новости buhexpert8.ru → канал «БухЭ
   1. Однострочное сообщение на каждую новую новость:
        📰 <Заголовок> — <ссылка>
      Отправляется ТОЛЬКО когда новость появилась (дедуп по id поста).
-  2. Обзор новости — прикреплённым HTML-файлом (содержимое div.entry-content,
+  2. Обзор новости — прикреплённым PDF-файлом (содержимое div.entry-content,
      обрезанное по фразе «Если вы еще не подписаны:» либо по служебному хвосту).
+     HTML → PDF конвертируется Chrome headless: встроенный просмотрщик Delo Space
+     открывает PDF нативно, тогда как HTML пришлось бы скачивать.
 
 Логика запуска (launchd, каждые 2 часа 8:45–20:45):
   1. Доотправка «хвостов»: записи с пустым sent_at / digest_sent_at.
   2. Сбор свежих новостей (AJAX, JSON с id) → новые = чьего id нет в БД.
-  3. Для каждой новой: запись в БД → однострочное уведомление → HTML-файл обзора.
+  3. Для каждой новой: запись в БД → однострочное уведомление → PDF-обзор.
      При сбое отправки — повтор каждые 5 минут, до RETRY_ATTEMPTS раз.
   4. Экспорт CSV-реестра.
 
@@ -72,27 +74,26 @@ async def send_with_retry(body: str, bot, label: str, chat_id: UUID = CHAT_NEWS)
     return False
 
 
-async def send_html_file(row, html_doc: str, bot, chat_id: UUID = CHAT_NEWS) -> bool:
-    """Отправляет обзор новости прикреплённым HTML-файлом (с повторами)."""
+async def send_pdf_file(row, pdf_bytes: bytes, bot, chat_id: UUID = CHAT_NEWS) -> bool:
+    """Отправляет обзор новости прикреплённым PDF-файлом (с повторами)."""
     from pybotx import OutgoingAttachment
     from buhexpert_send import BOT_ID
 
-    filename = f"buhexpert_news_{row['id']}.html"
-    content = html_doc.encode("utf-8")
+    filename = f"buhexpert_news_{row['id']}.pdf"
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
-            att = OutgoingAttachment(content=content, filename=filename)
+            att = OutgoingAttachment(content=pdf_bytes, filename=filename)
             await bot.send_message(bot_id=UUID(BOT_ID), chat_id=chat_id,
                                    body=f"📄 Обзор: {row['title']}",
                                    file=att, wait_callback=False)
             return True
         except Exception as e:
             if attempt < RETRY_ATTEMPTS:
-                log(f"   ⚠ обзор(html) {row['id']}: сбой {attempt}/{RETRY_ATTEMPTS}: "
+                log(f"   ⚠ обзор(pdf) {row['id']}: сбой {attempt}/{RETRY_ATTEMPTS}: "
                     f"{type(e).__name__}: {e}")
                 await asyncio.sleep(RETRY_DELAY)
             else:
-                log(f"   ❌ обзор(html) {row['id']}: не удалось — в отложенные")
+                log(f"   ❌ обзор(pdf) {row['id']}: не удалось — в отложенные")
     return False
 
 
@@ -105,22 +106,32 @@ async def process_news(conn, session, bot, chat_id: UUID = CHAT_NEWS) -> None:
             bn.mark_sent(conn, row["id"])
             log(f"   ✅ Уведомление отправлено (id={row['id']})")
 
-    # 2. HTML-обзоры
+    # 2. PDF-обзоры
     for row in bn.unsent_digests(conn):
         cur = bn.get_news(conn, row["id"])
-        html_doc = (cur["digest_text"] or "").strip() if cur else ""
-        if not html_doc:
+        pdf_bytes = (cur["digest_text"] or "").strip() if cur else ""
+        if pdf_bytes.startswith("PDF:"):
+            # уже сконвертирован и сохранён (файл на диске)
+            p = Path(pdf_bytes[4:])
+            pdf_bytes = p.read_bytes() if p.exists() else ""
+        else:
+            # собрать HTML и сконвертировать в PDF
             inner, marker = bn.fetch_news_html(session, row["url"])
             if not inner:
                 log(f"   ⚠ Обзор пуст (id={row['id']}) — пропускаю")
                 continue
             html_doc = bn.build_news_html(row, inner, marker)
-            bn.save_digest(conn, row["id"], html_doc, "paywall" if marker else "public")
-            log(f"📄 Обзор собран (id={row['id']}, {len(html_doc)} симв, "
+            pdf_bytes = bn.html_to_pdf(html_doc) or ""
+            if not pdf_bytes:
+                log(f"   ⚠ PDF не собран (id={row['id']}) — пропускаю")
+                continue
+            bn.save_digest(conn, row["id"], f"PDF:{len(pdf_bytes)}",
+                           "paywall" if marker else "public")
+            log(f"📄 PDF собран (id={row['id']}, {len(pdf_bytes)} байт, "
                 f"{'paywall' if marker else 'public'})")
-        if await send_html_file(row, html_doc, bot, chat_id):
+        if pdf_bytes and await send_pdf_file(row, pdf_bytes, bot, chat_id):
             bn.mark_digest_sent(conn, row["id"])
-            log(f"   ✅ Обзор отправлен (id={row['id']})")
+            log(f"   ✅ PDF-обзор отправлен (id={row['id']})")
 
 
 async def main_replay(target_date: str, interval: int) -> int:
@@ -152,12 +163,16 @@ async def main_replay(target_date: str, interval: int) -> int:
             # однострочное уведомление
             log(f"📤 [{i+1}/{len(rows)}] {row['title'][:50]}")
             await send_with_retry(fmt_news_line(row), b, f"уведомление {row['id']}")
-            # HTML-обзор
+            # PDF-обзор
             inner, marker = bn.fetch_news_html(session, row["url"])
             if inner:
                 html_doc = bn.build_news_html(row, inner, marker)
-                await send_html_file(row, html_doc, b)
-                log(f"   ✅ Уведомление + обзор отправлены (id={row['id']})")
+                pdf_bytes = bn.html_to_pdf(html_doc)
+                if pdf_bytes:
+                    await send_pdf_file(row, pdf_bytes, b)
+                    log(f"   ✅ Уведомление + PDF-обзор отправлены (id={row['id']})")
+                else:
+                    log(f"   ⚠ PDF не собран (id={row['id']})")
             else:
                 log(f"   ⚠ Обзор не собран (id={row['id']})")
     finally:
