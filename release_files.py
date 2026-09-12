@@ -6,6 +6,8 @@ release_files.py — построение ссылок на релизы и ск
 2. Строит URL страницы версии: /version_files?nick=...&ver=...
 3. Проваливается в страницу, ищет ссылку с текстом, содержащим «Новое в версии»
 4. Скачивает файл (обычно news.htm) во временную папку
+5. Конвертирует HTML -> PDF (Chrome headless), т.к. встроенный просмотрщик
+   Delo Space открывает PDF нативно, а HTML пришлось бы скачивать
 """
 import json
 import os
@@ -18,6 +20,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 import scraper
 from bs4 import BeautifulSoup
+from html_pdf import html_file_to_pdf, HTML_TO_PDF_AVAILABLE
 
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 PENDING_FILE = DOWNLOAD_DIR / "pending_files.json"
@@ -172,10 +175,21 @@ def download_news(session: requests.Session, row: dict) -> tuple[Optional[Path],
         resp = session.get(news_url, timeout=60)
         resp.raise_for_status()
         filepath.write_bytes(resp.content)
-        return filepath, False
     except Exception as e:
         print(f"   ⚠ Ошибка скачивания {news_url}: {e}")
         return None, False
+
+    # Конвертируем HTML -> PDF: встроенный просмотрщик Delo Space открывает
+    # PDF нативно, а HTML пришлось бы скачивать.
+    if ext in (".htm", ".html") and HTML_TO_PDF_AVAILABLE:
+        pdf_bytes = html_file_to_pdf(filepath, verbose=False)
+        if pdf_bytes:
+            pdf_path = filepath.with_suffix(".pdf")
+            pdf_path.write_bytes(pdf_bytes)
+            return pdf_path, False
+        print(f"   ⚠ PDF не собран из {filepath.name} — отправляю HTML")
+
+    return filepath, False
 
 
 def download_all_news_files(new_rows: list[dict]) -> list[Path]:

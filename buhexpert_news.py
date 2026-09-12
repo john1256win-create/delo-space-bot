@@ -12,11 +12,8 @@ buhexpert_news.py — новости buhexpert8.ru (блок #nos-1) для ка
            output/buhexpert_news.csv (без текста расшифровки).
 """
 import csv
-import shutil
 import sqlite3
-import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -26,6 +23,8 @@ from bs4 import BeautifulSoup
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+
+from html_pdf import html_to_pdf as _html_to_pdf, HTML_TO_PDF_AVAILABLE as _PDF_OK
 
 DATA_DIR = HERE / "data"
 OUT_DIR = HERE / "output"
@@ -37,16 +36,8 @@ AJAX_URL = f"{BASE_URL}/wp-admin/admin-ajax.php"
 NEWS_ACTION = "multibox_new"
 NEWS_TYPE = "allLastPostsLive"
 
-# Chrome для конвертации HTML → PDF (встроенный просмотрщик Delo Space
-# открывает PDF нативно, HTML пришлось бы скачивать)
-CHROME_PATHS = [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-]
+# Конвертация HTML → PDF вынесена в общий модуль html_pdf.py (используется
+# также релизным ботом Info_Bot). См. html_to_pdf ниже — тонкая обёртка.
 
 # Фраза-маркер: текст расшифровки обрезается до неё (точное совпадение)
 MARKER = "Если вы еще не подписаны:"
@@ -219,39 +210,9 @@ def build_news_html(row, inner_html: str, marker_found: bool) -> str:
 </html>"""
 
 
-def _find_chrome() -> Optional[str]:
-    """Возвращает путь к Chrome/Chromium для конвертации HTML→PDF."""
-    for p in CHROME_PATHS:
-        if Path(p).exists():
-            return p
-    return shutil.which("google-chrome") or shutil.which("chromium")
-
-
 def html_to_pdf(html_doc: str) -> Optional[bytes]:
-    """
-    Конвертирует HTML-документ в PDF через Chrome headless (--print-to-pdf).
-    Возвращает байты PDF или None при ошибке.
-    """
-    chrome = _find_chrome()
-    if not chrome:
-        print("   ⚠ Chrome не найден — PDF не будет собран")
-        return None
-    with tempfile.TemporaryDirectory() as td:
-        html_path = Path(td) / "doc.html"
-        pdf_path = Path(td) / "doc.pdf"
-        html_path.write_text(html_doc, encoding="utf-8")
-        try:
-            subprocess.run(
-                [chrome, "--headless", "--disable-gpu", "--no-pdf-header-footer",
-                 "--no-sandbox", f"--print-to-pdf={pdf_path}", html_path.as_uri()],
-                capture_output=True, timeout=120, check=False,
-            )
-        except Exception as e:
-            print(f"   ⚠ Ошибка Chrome: {type(e).__name__}: {e}")
-            return None
-        if not pdf_path.exists() or pdf_path.stat().st_size == 0:
-            return None
-        return pdf_path.read_bytes()
+    """Конвертирует HTML-документ в PDF (Chrome headless). См. html_pdf.py."""
+    return _html_to_pdf(html_doc)
 
 
 def fetch_news_text(session: requests.Session, url: str) -> tuple[str, bool]:
