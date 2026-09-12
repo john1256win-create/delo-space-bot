@@ -2,20 +2,29 @@
 """
 run_buhexpert_news.py — новости buhexpert8.ru → канал «БухЭксперт Новости» (79d09ddd-...).
 
-Логика одного запуска (launchd, каждые 2 часа 8:45–20:45):
-  1. Доотправка «хвостов»: записи с пустым sent_at / digest_sent_at
-     (мог упасть прошлый запуск, Mac был выключен) — персистентный retry.
+Формат отправки (по требованию):
+  1. Однострочное сообщение на каждую новую новость:
+       📰 <Заголовок> — <ссылка>
+     Отправляется ТОЛЬКО когда новость появилась (дедуп по id поста).
+  2. Обзор новости — прикреплённым HTML-файлом (содержимое div.entry-content,
+     обрезанное по фразе «Если вы еще не подписаны:» либо по служебному хвосту).
+
+Логика запуска (launchd, каждые 2 часа 8:45–20:45):
+  1. Доотправка «хвостов»: записи с пустым sent_at / digest_sent_at.
   2. Сбор свежих новостей (AJAX, JSON с id) → новые = чьего id нет в БД.
-  3. Для каждой новой:
-     a. уведомление (заголовок + дата + ссылка) → при сбое повтор каждые 5 мин;
-     b. текст div.entry-content (обрезка по «Если вы еще не подписаны:» либо
-        по служебному хвосту) → сохранение в БД → отправка расшифровки
-        → при сбое повтор каждые 5 мин.
+  3. Для каждой новой: запись в БД → однострочное уведомление → HTML-файл обзора.
+     При сбое отправки — повтор каждые 5 минут, до RETRY_ATTEMPTS раз.
   4. Экспорт CSV-реестра.
 
-Если отправка не прошла за RETRY_ATTEMPTS попыток — запись остаётся с пустым
-sent_at/digest_sent_at, и следующий запуск (через 2 часа) доотправит.
+Если отправка не прошла — запись остаётся с пустым sent_at/digest_sent_at,
+и следующий запуск доотправит (персистентный retry).
+
+Тестовый режим:
+  python run_buhexpert_news.py --replay-date 2026-09-11 [--interval 60]
+    — отправляет новости указанной даты (из БД) с интервалом N секунд,
+      имитируя их последовательное появление.
 """
+import argparse
 import asyncio
 import sys
 from datetime import datetime
@@ -33,7 +42,6 @@ CHAT_NEWS = UUID("79d09ddd-867e-50ab-996f-0cd39068d15b")
 
 RETRY_ATTEMPTS = 12      # 12 попыток × 5 мин = 1 час максимум в одном запуске
 RETRY_DELAY = 300        # 5 минут
-MAX_DIGEST_CHARS = 20000  # больше — отправляем .txt файлом, а не сообщением
 FIRST_RUN_POSTS = 10     # при первом запуске (пустая БД) — 10 последних новостей
 REGULAR_POSTS = 20       # в обычных запусках — с запасом
 
@@ -42,19 +50,9 @@ def log(msg: str) -> None:
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [бухэксперт:news] {msg}")
 
 
-def fmt_news_message(row) -> str:
-    """Уведомление о новости: заголовок + дата + ссылка."""
-    return (
-        f"📰 Новость на buhexpert8.ru\n"
-        f"**{row['title']}**\n"
-        f"📅 {row['date']}\n"
-        f"🔗 {row['url']}"
-    )
-
-
-def fmt_digest_message(row, text: str) -> str:
-    """Расшифровка новости с заголовком в начале."""
-    return f"📄 **{row['title']}** — расшифровка\n\n{text}"
+def fmt_news_line(row) -> str:
+    """Однострочное уведомление о новости: заголовок + ссылка."""
+    return f"📰 {row['title']} — {row['url']}"
 
 
 async def send_with_retry(body: str, bot, label: str, chat_id: UUID = CHAT_NEWS) -> bool:
@@ -74,45 +72,110 @@ async def send_with_retry(body: str, bot, label: str, chat_id: UUID = CHAT_NEWS)
     return False
 
 
-async def send_digest_with_retry(row, text: str, bot, chat_id: UUID = CHAT_NEWS) -> bool:
-    """Отправляет расшифровку. Длинный текст (> MAX_DIGEST_CHARS) — файлом .txt."""
+async def send_html_file(row, html_doc: str, bot, chat_id: UUID = CHAT_NEWS) -> bool:
+    """Отправляет обзор новости прикреплённым HTML-файлом (с повторами)."""
     from pybotx import OutgoingAttachment
     from buhexpert_send import BOT_ID
 
-    if len(text) <= MAX_DIGEST_CHARS:
-        return await send_with_retry(fmt_digest_message(row, text), bot, f"расшифровка {row['id']}",
-                                     chat_id=chat_id)
-
-    # Длинный текст — отправляем .txt файлом
-    body = fmt_digest_message(row, f"({len(text)} символов — во вложении текстовым файлом)")
-    filename = f"buhexpert_news_{row['id']}.txt"
+    filename = f"buhexpert_news_{row['id']}.html"
+    content = html_doc.encode("utf-8")
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
-            att = OutgoingAttachment(content=text.encode("utf-8"), filename=filename)
+            att = OutgoingAttachment(content=content, filename=filename)
             await bot.send_message(bot_id=UUID(BOT_ID), chat_id=chat_id,
-                                   body=body, wait_callback=False)
-            await bot.send_message(bot_id=UUID(BOT_ID), chat_id=chat_id,
-                                   body=f"📎 {filename}", file=att, wait_callback=False)
+                                   body=f"📄 Обзор: {row['title']}",
+                                   file=att, wait_callback=False)
             return True
         except Exception as e:
             if attempt < RETRY_ATTEMPTS:
-                log(f"   ⚠ расшифровка(файл) {row['id']}: сбой {attempt}/{RETRY_ATTEMPTS}: {e}")
+                log(f"   ⚠ обзор(html) {row['id']}: сбой {attempt}/{RETRY_ATTEMPTS}: "
+                    f"{type(e).__name__}: {e}")
                 await asyncio.sleep(RETRY_DELAY)
             else:
-                log(f"   ❌ расшифровка(файл) {row['id']}: не удалось — в отложенные")
+                log(f"   ❌ обзор(html) {row['id']}: не удалось — в отложенные")
     return False
+
+
+async def process_news(conn, session, bot, chat_id: UUID = CHAT_NEWS) -> None:
+    """Отправляет неотправленные уведомления и обзоры (персистентный retry)."""
+    # 1. Однострочные уведомления
+    for row in bn.unsent_news(conn):
+        log(f"📤 Уведомление: {row['title'][:50]}")
+        if await send_with_retry(fmt_news_line(row), bot, f"уведомление {row['id']}", chat_id):
+            bn.mark_sent(conn, row["id"])
+            log(f"   ✅ Уведомление отправлено (id={row['id']})")
+
+    # 2. HTML-обзоры
+    for row in bn.unsent_digests(conn):
+        cur = bn.get_news(conn, row["id"])
+        html_doc = (cur["digest_text"] or "").strip() if cur else ""
+        if not html_doc:
+            inner, marker = bn.fetch_news_html(session, row["url"])
+            if not inner:
+                log(f"   ⚠ Обзор пуст (id={row['id']}) — пропускаю")
+                continue
+            html_doc = bn.build_news_html(row, inner, marker)
+            bn.save_digest(conn, row["id"], html_doc, "paywall" if marker else "public")
+            log(f"📄 Обзор собран (id={row['id']}, {len(html_doc)} симв, "
+                f"{'paywall' if marker else 'public'})")
+        if await send_html_file(row, html_doc, bot, chat_id):
+            bn.mark_digest_sent(conn, row["id"])
+            log(f"   ✅ Обзор отправлен (id={row['id']})")
+
+
+async def main_replay(target_date: str, interval: int) -> int:
+    """Тестовый режим: отправить новости указанной даты с интервалом N секунд."""
+    conn = bn.init_db()
+    session = bn._make_session()
+    # отбор по ISO-дате: колонка datetime вида '2026-09-11 09:46:00'
+    rows = list(conn.execute(
+        "SELECT * FROM news WHERE datetime LIKE ? ORDER BY datetime, id",
+        (f"{target_date}%",)
+    ))
+    log(f"🔁 REPLAY {target_date}: новостей {len(rows)}, интервал {interval}s")
+
+    if not rows:
+        log("   нет новостей за указанную дату")
+        conn.close()
+        return 0
+
+    if not bs.login(session):
+        log("   ⚠ не удалось авторизоваться — обзоры будут неполными")
+
+    from bot import get_bot
+    b = get_bot()
+    await b.startup()
+    try:
+        for i, row in enumerate(rows):
+            if i:
+                await asyncio.sleep(interval)
+            # однострочное уведомление
+            log(f"📤 [{i+1}/{len(rows)}] {row['title'][:50]}")
+            await send_with_retry(fmt_news_line(row), b, f"уведомление {row['id']}")
+            # HTML-обзор
+            inner, marker = bn.fetch_news_html(session, row["url"])
+            if inner:
+                html_doc = bn.build_news_html(row, inner, marker)
+                await send_html_file(row, html_doc, b)
+                log(f"   ✅ Уведомление + обзор отправлены (id={row['id']})")
+            else:
+                log(f"   ⚠ Обзор не собран (id={row['id']})")
+    finally:
+        await b.shutdown()
+    conn.close()
+    log("🔁 REPLAY завершён")
+    return 0
 
 
 async def main() -> int:
     conn = bn.init_db()
     session = bn._make_session()
 
-    # ── 1. Доотправка уведомлений ──────────────────────────
     pending = bn.unsent_news(conn)
     if pending:
         log(f"🔁 Неотправленных уведомлений: {len(pending)}")
 
-    # ── 2. Сбор новостей ───────────────────────────────────
+    # ── Сбор новостей ──────────────────────────────────────
     known = bn.known_ids(conn)
     first_run = len(known) == 0
     limit = FIRST_RUN_POSTS if first_run else REGULAR_POSTS
@@ -121,8 +184,7 @@ async def main() -> int:
         f"{', первый запуск' if first_run else ''}), уже известно: {len(known)}")
 
     new_posts = [p for p in posts if p["id"] not in known]
-    # Сначала старые (по возрастанию id), чтобы канал читался хронологически
-    new_posts.sort(key=lambda p: p["id"])
+    new_posts.sort(key=lambda p: p["id"])  # хронологически
     if new_posts:
         log(f"   🆕 Новых: {len(new_posts)}")
     for p in new_posts:
@@ -130,47 +192,33 @@ async def main() -> int:
     if new_posts or pending:
         bn.export_csv(conn)
 
-    # ── 3. Авторизация для текстов новостей ───────────────—
-    if bn.unsent_news(conn):
+    # ── Авторизация для обзоров ────────────────────────────
+    if bn.unsent_news(conn) or bn.unsent_digests(conn):
         if not bs.login(session):
-            log("   ⚠ Не удалось авторизоваться на buhexpert8.ru — тексты недоступны")
+            log("   ⚠ Не удалось авторизоваться на buhexpert8.ru — обзоры недоступны")
 
     from bot import get_bot
     b = get_bot()
     await b.startup()
     try:
-        # ── 3a. Уведомления ────────────────────────────────
-        for row in bn.unsent_news(conn):
-            log(f"📤 Уведомление: {row['title'][:50]}")
-            if await send_with_retry(fmt_news_message(row), b, f"уведомление {row['id']}"):
-                bn.mark_sent(conn, row["id"])
-                log(f"   ✅ Уведомление отправлено (id={row['id']})")
-
-        # ── 3b. Расшифровки ────────────────────────────────
-        for row in bn.unsent_digests(conn):
-            cur = bn.get_news(conn, row["id"])
-            text = (cur["digest_text"] or "").strip() if cur else ""
-            if not text:
-                text, marker = bn.fetch_news_text(session, row["url"])
-                note = "paywall" if marker else "public"
-                if not text:
-                    log(f"   ⚠ Расшифровка пуста (id={row['id']}) — пропускаю")
-                    continue
-                bn.save_digest(conn, row["id"], text, note)
-                log(f"📄 Расшифровка получена (id={row['id']}, {len(text)} симв, {note})")
-            if await send_digest_with_retry(row, text, b):
-                bn.mark_digest_sent(conn, row["id"])
-                log(f"   ✅ Расшифровка отправлена (id={row['id']})")
+        await process_news(conn, session, b)
     finally:
         await b.shutdown()
 
     bn.export_csv(conn)
     log(f"📊 Итог: всего={conn.execute('SELECT COUNT(*) FROM news').fetchone()[0]}, "
         f"без уведомления={len(bn.unsent_news(conn))}, "
-        f"без расшифровки={len(bn.unsent_digests(conn))}")
+        f"без обзора={len(bn.unsent_digests(conn))}")
     conn.close()
     return 0
 
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--replay-date", help="тест: отправить новости даты (ISO, напр. 2026-09-11)")
+    ap.add_argument("--interval", type=int, default=60, help="интервал между новостями, сек (replay)")
+    args = ap.parse_args()
+
+    if args.replay_date:
+        sys.exit(asyncio.run(main_replay(args.replay_date, args.interval)))
     sys.exit(asyncio.run(main()))

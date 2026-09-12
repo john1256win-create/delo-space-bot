@@ -125,6 +125,86 @@ def _extract_block_text(root) -> str:
     return "\n".join(lines)
 
 
+def fetch_news_html(session: requests.Session, url: str) -> tuple[str, bool]:
+    """
+    Сырой HTML содержимого новости (внутренность div.entry-content) для файла-обзора.
+
+    Обрезка (как в fetch_news_text):
+      1. по фразе MARKER «Если вы еще не подписаны:» — если найдена;
+      2. иначе по служебному хвосту TAIL_MARKER.
+    Возвращает (html, marker_found).
+    """
+    try:
+        r = session.get(url, timeout=TIMEOUT)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"   ⚠ Ошибка загрузки новости {url}: {type(e).__name__}: {e}")
+        return "", False
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    ec = soup.find(class_="entry-content")
+    if ec is None:
+        return "", False
+
+    html = str(ec)
+    marker_found = False
+    idx = html.find(MARKER)
+    if idx >= 0:
+        html = html[:idx]
+        marker_found = True
+    else:
+        idx2 = html.find(TAIL_MARKER)
+        if idx2 >= 0:
+            html = html[:idx2]
+    # закрываем возможные незакрытые теги
+    return html.strip(), marker_found
+
+
+def _row_get(row, key: str, default: str = "") -> str:
+    """Безопасно достаёт значение из sqlite3.Row (или dict)."""
+    try:
+        val = row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+    return val if val is not None else default
+
+
+def build_news_html(row, inner_html: str, marker_found: bool) -> str:
+    """Оборачивает содержимое новости в автономный HTML-документ (для вложения)."""
+    title = _row_get(row, "title", "Новость")
+    date = _row_get(row, "date", "")
+    url = _row_get(row, "url", "")
+    note = ("Показана публичная часть (далее требуется подписка)"
+            if marker_found else "Полный текст новости")
+    return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  body {{ font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+         max-width: 820px; margin: 24px auto; padding: 0 18px; color: #17212b;
+         line-height: 1.6; font-size: 16px; }}
+  h1 {{ font-size: 22px; margin: 0 0 6px; }}
+  .meta {{ color: #5b6b78; font-size: 14px; margin-bottom: 4px; }}
+  .meta a {{ color: #108f76; }}
+  .note {{ background: #f4f9f7; border-left: 3px solid #108f76;
+           padding: 8px 12px; font-size: 13px; color: #3d5a54; margin: 14px 0; }}
+  img {{ max-width: 100%; height: auto; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  td, th {{ border: 1px solid #dbe3e8; padding: 6px 10px; }}
+  a {{ color: #108f76; }}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+<div class="meta">📅 {date} &nbsp;·&nbsp; Источник: <a href="{url}">buhexpert8.ru</a></div>
+<div class="note">{note}</div>
+{inner_html}
+</body>
+</html>"""
+
+
 def fetch_news_text(session: requests.Session, url: str) -> tuple[str, bool]:
     """
     Текст новости из div.entry-content.
