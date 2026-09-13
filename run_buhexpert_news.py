@@ -118,7 +118,10 @@ async def process_news(conn, session, bot, chat_id: UUID = CHAT_NEWS) -> None:
             # собрать HTML и сконвертировать в PDF
             inner, marker = bn.fetch_news_html(session, row["url"])
             if not inner:
-                log(f"   ⚠ Обзор пуст (id={row['id']}) — пропускаю")
+                # контента на странице нет (например, только видеозапись эфира) —
+                # помечаем, чтобы не пытаться снова при каждом прогоне
+                bn.mark_no_content(conn, row["id"])
+                log(f"   ⚠ Обзор пуст (id={row['id']}) — помечено no-content, повтор не потребуется")
                 continue
             html_doc = bn.build_news_html(row, inner, marker)
             pdf_bytes = bn.html_to_pdf(html_doc) or ""

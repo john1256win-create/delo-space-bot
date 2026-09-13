@@ -132,12 +132,18 @@ def _extract_block_text(root) -> str:
 
 def fetch_news_html(session: requests.Session, url: str) -> tuple[str, bool]:
     """
-    Сырой HTML содержимого новости (внутренность div.entry-content) для файла-обзора.
+    Сырой HTML содержимого новости для файла-обзора.
 
-    Обрезка (как в fetch_news_text):
+    Селекторы (по приоритету):
+      1. div.entry-content — обычные новости/статьи (основной случай);
+      2. .container.main-content-area — записи прямых эфиров и семинаров:
+         у них НЕТ entry-content, но есть этот контейнер (лектор, дата,
+         программа, отзывы; без футера).
+
+    Обрезка:
       1. по фразе MARKER «Если вы еще не подписаны:» — если найдена;
       2. иначе по служебному хвосту TAIL_MARKER.
-    Возвращает (html, marker_found).
+    Возвращает (html, marker_found). Если контента нет вовсе — ("", False).
     """
     try:
         r = session.get(url, timeout=TIMEOUT)
@@ -147,11 +153,19 @@ def fetch_news_html(session: requests.Session, url: str) -> tuple[str, bool]:
         return "", False
 
     soup = BeautifulSoup(r.text, "html.parser")
-    ec = soup.find(class_="entry-content")
-    if ec is None:
+    # 1) обычные новости
+    node = soup.find(class_="entry-content")
+    if node is None:
+        # 2) записи эфиров/семинаров — контейнер страницы события
+        node = soup.select_one(".container.main-content-area")
+    if node is None:
         return "", False
 
-    html = str(ec)
+    # убираем служебные вставки, чтобы PDF был чистым
+    for junk in node.find_all(["script", "style", "noscript"]):
+        junk.decompose()
+
+    html = str(node)
     marker_found = False
     idx = html.find(MARKER)
     if idx >= 0:
@@ -304,11 +318,22 @@ def unsent_news(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def unsent_digests(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Новости с отправленным уведомлением, но неотправленной расшифровкой."""
+    """Новости с отправленным уведомлением, но неотправленным обзором.
+
+    Записи с note='no-content' исключены: на странице нет пригодного контента
+    (например, видеозапись эфира без текста) — повторять сбор бессмысленно.
+    """
     return list(conn.execute(
         "SELECT * FROM news WHERE sent_at IS NOT NULL AND sent_at<>'' "
-        "AND (digest_sent_at IS NULL OR digest_sent_at='') ORDER BY id"
+        "AND (digest_sent_at IS NULL OR digest_sent_at='') "
+        "AND (note IS NULL OR note<>'no-content') ORDER BY id"
     ))
+
+
+def mark_no_content(conn: sqlite3.Connection, news_id: int) -> None:
+    """Помечает новость как «контента для обзора нет» — исключает из повторных попыток."""
+    conn.execute("UPDATE news SET note='no-content' WHERE id=?", (news_id,))
+    conn.commit()
 
 
 def save_digest(conn: sqlite3.Connection, news_id: int, text: str, note: str = "") -> None:
