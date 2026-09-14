@@ -313,7 +313,7 @@ def save_news(conn: sqlite3.Connection, post: dict) -> None:
 def unsent_news(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Новости, чьё уведомление ещё не отправлено (персистентный retry)."""
     return list(conn.execute(
-        "SELECT * FROM news WHERE sent_at IS NULL OR sent_at='' ORDER BY id"
+        "SELECT * FROM news WHERE sent_at IS NULL OR sent_at='' ORDER BY datetime, id"
     ))
 
 
@@ -326,7 +326,24 @@ def unsent_digests(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return list(conn.execute(
         "SELECT * FROM news WHERE sent_at IS NOT NULL AND sent_at<>'' "
         "AND (digest_sent_at IS NULL OR digest_sent_at='') "
-        "AND (note IS NULL OR note<>'no-content') ORDER BY id"
+        "AND (note IS NULL OR note<>'no-content') ORDER BY datetime, id"
+    ))
+
+
+def pending_news(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Новости, которым нужна отправка (уведомление и/или обзор), по хронологии.
+
+    Сортировка по datetime, а не по id: id поста не монотонен по времени
+    (id=14367 опубликован 11.09, а id=598776 — 10.09), из-за чего пары
+    «новость + файл» шли бы не по порядку.
+    """
+    return list(conn.execute(
+        "SELECT * FROM news WHERE "
+        "  (sent_at IS NULL OR sent_at='') "
+        "  OR (sent_at IS NOT NULL AND sent_at<>'' "
+        "      AND (digest_sent_at IS NULL OR digest_sent_at='') "
+        "      AND (note IS NULL OR note<>'no-content')) "
+        "ORDER BY datetime, id"
     ))
 
 

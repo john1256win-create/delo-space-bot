@@ -144,32 +144,12 @@ async def process_one(conn, session, row, bot, chat_id: UUID = CHAT_NEWS) -> Non
         log(f"   ✅ PDF-обзор отправлен (id={row['id']})")
 
 
-def pending_ids(conn) -> list[int]:
-    """id новостей, которым нужна отправка (уведомление и/или обзор), по хронологии.
-
-    Сортировка по datetime (дата публикации на сайте), а не по id: числовой id
-    не монотонен по времени, из-за чего пары «новость + файл» шли бы не по порядку.
-    """
-    rows = conn.execute(
-        "SELECT id, datetime FROM news WHERE "
-        "  (sent_at IS NULL OR sent_at='') "
-        "  OR (sent_at IS NOT NULL AND sent_at<>'' "
-        "      AND (digest_sent_at IS NULL OR digest_sent_at='') "
-        "      AND (note IS NULL OR note<>'no-content')) "
-        "ORDER BY datetime, id"
-    ).fetchall()
-    return [r["id"] for r in rows]
-
-
 async def process_news(conn, session, bot, chat_id: UUID = CHAT_NEWS) -> None:
     """Отправляет неотправленные новости в порядке: новость → её файл → следующая.
 
     Персистентный retry: сначала хвосты прошлых запусков, затем новые.
     """
-    for news_id in pending_ids(conn):
-        row = bn.get_news(conn, news_id)
-        if row is None:
-            continue
+    for row in bn.pending_news(conn):
         await process_one(conn, session, row, bot, chat_id)
 
 
