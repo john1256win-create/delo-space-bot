@@ -115,12 +115,9 @@ async def process_one(conn, session, row, bot, chat_id: UUID = CHAT_NEWS) -> Non
 
     # 2) PDF-обзор этой же новости
     cur = bn.get_news(conn, row["id"])
-    pdf_bytes = (cur["digest_text"] or "").strip() if cur else ""
-    if pdf_bytes.startswith("PDF:"):
-        # уже сконвертирован и сохранён (файл на диске)
-        p = Path(pdf_bytes[4:])
-        pdf_bytes = p.read_bytes() if p.exists() else ""
-    else:
+    # сначала пробуем взять уже собранный PDF с диска (retry/resend)
+    pdf_bytes = bn.load_pdf(cur["digest_text"] if cur else "")
+    if not pdf_bytes:
         # собрать HTML и сконвертировать в PDF
         inner, marker = bn.fetch_news_html(session, row["url"])
         if not inner:
@@ -134,7 +131,8 @@ async def process_one(conn, session, row, bot, chat_id: UUID = CHAT_NEWS) -> Non
         if not pdf_bytes:
             log(f"   ⚠ PDF не собран (id={row['id']}) — пропускаю")
             return
-        bn.save_digest(conn, row["id"], f"PDF:{len(pdf_bytes)}",
+        pdf_path = bn.save_pdf(row["id"], pdf_bytes)
+        bn.save_digest(conn, row["id"], f"PDF:{pdf_path}",
                        "paywall" if marker else "public")
         log(f"📄 PDF собран (id={row['id']}, {len(pdf_bytes)} байт, "
             f"{'paywall' if marker else 'public'})")
@@ -144,13 +142,61 @@ async def process_one(conn, session, row, bot, chat_id: UUID = CHAT_NEWS) -> Non
         log(f"   ✅ PDF-обзор отправлен (id={row['id']})")
 
 
-async def process_news(conn, session, bot, chat_id: UUID = CHAT_NEWS) -> None:
+async def process_news(conn, session, bot, chat_id: UUID = CHAT_NEWS,
+                       pause: float = 0.0) -> None:
     """Отправляет неотправленные новости в порядке: новость → её файл → следующая.
 
     Персистентный retry: сначала хвосты прошлых запусков, затем новые.
+    pause — пауза между новостями (для наглядного теста; в штатном режиме 0).
     """
     for row in bn.pending_news(conn):
         await process_one(conn, session, row, bot, chat_id)
+        if pause:
+            await asyncio.sleep(pause)
+
+
+async def main_resend(target_date: str, interval: int) -> int:
+    """Тест: сбросить отметки новостей даты и прогнать ШТАТНУЮ логику отправки.
+
+    В отличие от main_replay (свой упрощённый путь), здесь используется тот же
+    process_news/process_one, что и в расписании — проверяется реальное поведение.
+    """
+    conn = bn.init_db()
+    session = bn._make_session()
+
+    rows = list(conn.execute(
+        "SELECT * FROM news WHERE datetime LIKE ? ORDER BY datetime, id",
+        (f"{target_date}%",)))
+    log(f"↻ RESEND {target_date}: новостей {len(rows)}, пауза {interval}s")
+    if not rows:
+        log("   нет новостей за указанную дату")
+        conn.close()
+        return 0
+
+    # сбрасываем отметки, чтобы записи попали в pending_news()
+    for r in rows:
+        conn.execute("UPDATE news SET sent_at=NULL, digest_sent_at=NULL WHERE id=?",
+                     (r["id"],))
+    conn.commit()
+    log(f"   сброшены отметки у {len(rows)} новостей → очередь: "
+        f"{[x['id'] for x in bn.pending_news(conn)]}")
+
+    if not bs.login(session):
+        log("   ⚠ не удалось авторизоваться — обзоры будут неполными")
+
+    from bot import get_bot
+    b = get_bot()
+    await b.startup()
+    try:
+        await process_news(conn, session, b, pause=interval)
+    finally:
+        await b.shutdown()
+
+    log(f"📊 Итог: без уведомления={len(bn.unsent_news(conn))}, "
+        f"без обзора={len(bn.unsent_digests(conn))}")
+    conn.close()
+    log("↻ RESEND завершён")
+    return 0
 
 
 async def main_replay(target_date: str, interval: int) -> int:
@@ -250,9 +296,12 @@ async def main() -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--replay-date", help="тест: отправить новости даты (ISO, напр. 2026-09-11)")
-    ap.add_argument("--interval", type=int, default=60, help="интервал между новостями, сек (replay)")
+    ap.add_argument("--resend-date", help="тест: сбросить отметки даты и прогнать штатную логику")
+    ap.add_argument("--interval", type=int, default=60, help="пауза между новостями, сек")
     args = ap.parse_args()
 
+    if args.resend_date:
+        sys.exit(asyncio.run(main_resend(args.resend_date, args.interval)))
     if args.replay_date:
         sys.exit(asyncio.run(main_replay(args.replay_date, args.interval)))
     sys.exit(asyncio.run(main()))

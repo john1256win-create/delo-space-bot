@@ -354,8 +354,36 @@ def mark_no_content(conn: sqlite3.Connection, news_id: int) -> None:
 
 
 def save_digest(conn: sqlite3.Connection, news_id: int, text: str, note: str = "") -> None:
+    """Сохраняет сведения об обзоре. text = 'PDF:<путь к файлу>' (см. save_pdf)."""
     conn.execute("UPDATE news SET digest_text=?, note=? WHERE id=?", (text, note, news_id))
     conn.commit()
+
+
+PDF_DIR = DATA_DIR / "news_pdf"
+
+
+def save_pdf(news_id: int, pdf_bytes: bytes) -> Path:
+    """Сохраняет PDF-обзор на диск и возвращает путь.
+
+    Файл нужен, чтобы при повторной отправке (retry/resend) не ходить
+    на сайт и не конвертировать HTML заново.
+    """
+    PDF_DIR.mkdir(parents=True, exist_ok=True)
+    path = PDF_DIR / f"{news_id}.pdf"
+    path.write_bytes(pdf_bytes)
+    return path
+
+
+def load_pdf(digest_text: str) -> Optional[bytes]:
+    """Читает ранее сохранённый PDF по значению колонки digest_text.
+
+    Возвращает None, если PDF ещё не собран или файл пропал —
+    тогда вызывающий код пересоберёт обзор.
+    """
+    if not digest_text or not digest_text.startswith("PDF:"):
+        return None
+    path = Path(digest_text[4:])
+    return path.read_bytes() if path.is_file() else None
 
 
 def mark_sent(conn: sqlite3.Connection, news_id: int) -> None:
