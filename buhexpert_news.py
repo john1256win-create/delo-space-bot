@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from html_pdf import html_to_pdf as _html_to_pdf, HTML_TO_PDF_AVAILABLE as _PDF_OK
+from html_pdf import html_to_pdf as _html_to_pdf
 
 DATA_DIR = HERE / "data"
 OUT_DIR = HERE / "output"
