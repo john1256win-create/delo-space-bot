@@ -97,44 +97,80 @@ async def send_pdf_file(row, pdf_bytes: bytes, bot, chat_id: UUID = CHAT_NEWS) -
     return False
 
 
-async def process_news(conn, session, bot, chat_id: UUID = CHAT_NEWS) -> None:
-    """Отправляет неотправленные уведомления и обзоры (персистентный retry)."""
-    # 1. Однострочные уведомления
-    for row in bn.unsent_news(conn):
+async def process_one(conn, session, row, bot, chat_id: UUID = CHAT_NEWS) -> None:
+    """Отправляет одну новость: сначала уведомление, затем её PDF-обзор.
+
+    Порядок внутри новости строгий: новость → файл. Именно так, чтобы в чате
+    пары «новость + вложение» шли подряд, а не все новости, потом все файлы.
+    """
+    # 1) Уведомление (если ещё не отправлено)
+    if not (row["sent_at"] or "").strip():
         log(f"📤 Уведомление: {row['title'][:50]}")
         if await send_with_retry(fmt_news_line(row), bot, f"уведомление {row['id']}", chat_id):
             bn.mark_sent(conn, row["id"])
             log(f"   ✅ Уведомление отправлено (id={row['id']})")
-
-    # 2. PDF-обзоры
-    for row in bn.unsent_digests(conn):
-        cur = bn.get_news(conn, row["id"])
-        pdf_bytes = (cur["digest_text"] or "").strip() if cur else ""
-        if pdf_bytes.startswith("PDF:"):
-            # уже сконвертирован и сохранён (файл на диске)
-            p = Path(pdf_bytes[4:])
-            pdf_bytes = p.read_bytes() if p.exists() else ""
         else:
-            # собрать HTML и сконвертировать в PDF
-            inner, marker = bn.fetch_news_html(session, row["url"])
-            if not inner:
-                # контента на странице нет (например, только видеозапись эфира) —
-                # помечаем, чтобы не пытаться снова при каждом прогоне
-                bn.mark_no_content(conn, row["id"])
-                log(f"   ⚠ Обзор пуст (id={row['id']}) — помечено no-content, повтор не потребуется")
-                continue
-            html_doc = bn.build_news_html(row, inner, marker)
-            pdf_bytes = bn.html_to_pdf(html_doc) or ""
-            if not pdf_bytes:
-                log(f"   ⚠ PDF не собран (id={row['id']}) — пропускаю")
-                continue
-            bn.save_digest(conn, row["id"], f"PDF:{len(pdf_bytes)}",
-                           "paywall" if marker else "public")
-            log(f"📄 PDF собран (id={row['id']}, {len(pdf_bytes)} байт, "
-                f"{'paywall' if marker else 'public'})")
-        if pdf_bytes and await send_pdf_file(row, pdf_bytes, bot, chat_id):
-            bn.mark_digest_sent(conn, row["id"])
-            log(f"   ✅ PDF-обзор отправлен (id={row['id']})")
+            # без уведомления файл слать не имеет смысла — повторим в следующий запуск
+            return
+
+    # 2) PDF-обзор этой же новости
+    cur = bn.get_news(conn, row["id"])
+    pdf_bytes = (cur["digest_text"] or "").strip() if cur else ""
+    if pdf_bytes.startswith("PDF:"):
+        # уже сконвертирован и сохранён (файл на диске)
+        p = Path(pdf_bytes[4:])
+        pdf_bytes = p.read_bytes() if p.exists() else ""
+    else:
+        # собрать HTML и сконвертировать в PDF
+        inner, marker = bn.fetch_news_html(session, row["url"])
+        if not inner:
+            # контента на странице нет (например, только видеозапись эфира) —
+            # помечаем, чтобы не пытаться снова при каждом прогоне
+            bn.mark_no_content(conn, row["id"])
+            log(f"   ⚠ Обзор пуст (id={row['id']}) — помечено no-content, повтор не потребуется")
+            return
+        html_doc = bn.build_news_html(row, inner, marker)
+        pdf_bytes = bn.html_to_pdf(html_doc) or ""
+        if not pdf_bytes:
+            log(f"   ⚠ PDF не собран (id={row['id']}) — пропускаю")
+            return
+        bn.save_digest(conn, row["id"], f"PDF:{len(pdf_bytes)}",
+                       "paywall" if marker else "public")
+        log(f"📄 PDF собран (id={row['id']}, {len(pdf_bytes)} байт, "
+            f"{'paywall' if marker else 'public'})")
+
+    if pdf_bytes and await send_pdf_file(row, pdf_bytes, bot, chat_id):
+        bn.mark_digest_sent(conn, row["id"])
+        log(f"   ✅ PDF-обзор отправлен (id={row['id']})")
+
+
+def pending_ids(conn) -> list[int]:
+    """id новостей, которым нужна отправка (уведомление и/или обзор), по хронологии.
+
+    Сортировка по datetime (дата публикации на сайте), а не по id: числовой id
+    не монотонен по времени, из-за чего пары «новость + файл» шли бы не по порядку.
+    """
+    rows = conn.execute(
+        "SELECT id, datetime FROM news WHERE "
+        "  (sent_at IS NULL OR sent_at='') "
+        "  OR (sent_at IS NOT NULL AND sent_at<>'' "
+        "      AND (digest_sent_at IS NULL OR digest_sent_at='') "
+        "      AND (note IS NULL OR note<>'no-content')) "
+        "ORDER BY datetime, id"
+    ).fetchall()
+    return [r["id"] for r in rows]
+
+
+async def process_news(conn, session, bot, chat_id: UUID = CHAT_NEWS) -> None:
+    """Отправляет неотправленные новости в порядке: новость → её файл → следующая.
+
+    Персистентный retry: сначала хвосты прошлых запусков, затем новые.
+    """
+    for news_id in pending_ids(conn):
+        row = bn.get_news(conn, news_id)
+        if row is None:
+            continue
+        await process_one(conn, session, row, bot, chat_id)
 
 
 async def main_replay(target_date: str, interval: int) -> int:
