@@ -94,6 +94,55 @@ def num(v) -> str:
         return "—"
 
 
+# Символы, значимые для markdown-it (клиент Delo Space рендерит тело сообщения
+# как CommonMark: `.chat-message__text .markdown`, библиотека markdown-it).
+# Данные из БД вставляем в размеченный текст, поэтому экранируем.
+MD_SPECIAL = "*_`[]\\"
+
+
+def esc(s) -> str:
+    """Экранирует markdown-спецсимволы в пользовательских данных.
+
+    Нужно, чтобы название задачи со звёздочкой/бэктиком не ломало разметку
+    (например `1С_TK_v35.35` внутри слова markdown-it сам не трогает, но
+    одиночная `*` или `` ` `` изменит форматирование).
+    """
+    return "".join("\\" + c if c in MD_SPECIAL else c for c in (s or ""))
+
+
+def norm(s) -> str:
+    """Нормализует пробелы: сжимает повторные и убирает краевые.
+
+    В исходных названиях заявок встречаются двойные пробелы и ведущий пробел
+    (« Ограничение доступа…», «…из Excel»:  добавить проверку»). В отчёте
+    приводим к одному пробелу — читаемость важнее дословности выгрузки.
+    """
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def labor_arrow(plan, fact) -> str:
+    """Стрелка-индикатор рядом с парой план/факт по часам.
+
+    План больше факта → зелёная стрелка вниз (🟢⬇️, часы сэкономлены).
+    План меньше факта → красная стрелка вверх (🔴⬆️, перерасход).
+    Равны или данных нет → без стрелки.
+
+    В эмодзи нет односимвольной «зелёной стрелки вниз»/«красной вверх»,
+    поэтому цвет задаётся кружком, направление — стрелкой.
+    """
+    if plan is None or fact is None:
+        return ""
+    try:
+        p, f = float(plan), float(fact)
+    except (TypeError, ValueError):
+        return ""
+    if f < p:
+        return " 🟢⬇️"
+    if f > p:
+        return " 🔴⬆️"
+    return ""
+
+
 def load_sent() -> dict:
     if SENT_LOG.exists():
         try:
@@ -157,24 +206,32 @@ def build_report(conn: sqlite3.Connection, release: str, order: list[str]) -> st
         return None
 
     lines = [
-        f"Релиз **{release}** — стартует период тестирования",
-        f"Задачи ниже приоритета «{THRESHOLD_STATUS}»: {len(selected)} из {len(tasks)}",
+        f"Релиз **{esc(release)}** — стартует период тестирования",
+        f"Задачи ниже приоритета «{esc(THRESHOLD_STATUS)}»: {len(selected)} из {len(tasks)}",
         "",
     ]
     for i, t in enumerate(selected, 1):
         ms = max_status(t)
-        lines.append(f"{i}) {t['request_code']} — {(t['request_name'] or '').strip()}")
+        # Номер: экранируем «)», иначе markdown-it превратит строку в <ol><li>.
+        # Ведущих пробелов НЕ ставим — markdown их съедает; переносы строк
+        # сохраняет CSS клиента (`.chat-message__text { white-space: pre-wrap }`).
+        # 1) номер задачи — полужирный; название нормализуем и экранируем
+        lines.append(f"{i}\\) **{esc(t['request_code'])}** — {esc(norm(t['request_name']))}")
+        # 2) стрелка рядом с парой план/факт: зелёная вниз (план>факт), красная вверх (план<факт)
         lines.append(
-            f"   Разработчик: {t['programmer'] or '—'} "
-            f"(разр. {num(t['development_plan'])} / {num(t['development_actual'])} ч)"
+            f"Разработчик: {esc(norm(t['programmer']) or '—')} "
+            f"(разр. {num(t['development_plan'])} / {num(t['development_actual'])} ч"
+            f"{labor_arrow(t['development_plan'], t['development_actual'])})"
         )
         lines.append(
-            f"   Методолог: {t['methodologist'] or '—'} "
-            f"(мет. {num(t['methodology_plan'])} / {num(t['methodology_actual'])} ч)"
+            f"Методолог: {esc(norm(t['methodologist']) or '—')} "
+            f"(мет. {num(t['methodology_plan'])} / {num(t['methodology_actual'])} ч"
+            f"{labor_arrow(t['methodology_plan'], t['methodology_actual'])})"
         )
-        tail = f"   Статус: {t['last_status'] or '—'}"
+        # 3) статус — полужирный; 4) максимальный статус — курсивом
+        tail = f"Статус: **{esc(t['last_status'] or '—')}**"
         if ms:
-            tail += f"  |  Макс.: {ms}"
+            tail += f" | Макс.: *{esc(ms)}*"
         lines.append(tail)
         lines.append("")
 
