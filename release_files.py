@@ -10,8 +10,8 @@ release_files.py — построение ссылок на релизы и ск
    Delo Space открывает PDF нативно, а HTML пришлось бы скачивать
 
 Если сервис файлов releases.1c.ru отдаёт заглушку «Ошибка на нашем сервере»
-(«временно недоступен»), релиз ставится в очередь повторов и retry_loop()
-делает до MAX_ATTEMPTS=5 попыток с интервалом RETRY_DELAY=1 час.
+(«временно недоступен»), релиз ставится в очередь повторов; её разбирает
+launchd-агент com.salnikov.1c-release-retry (run_once, раз в час, 5 попыток).
 """
 import json
 import os
@@ -338,8 +338,8 @@ def download_all_news_files(new_rows: list[dict]) -> list[Path]:
     """Скачивает «Новое в версии» для новых релизов.
 
     Если сервис файлов недоступен (заглушка «временно недоступен»), релиз
-    ставится в очередь повторов (pending_files.json) — повтор выполняет
-    retry_loop() через час, до MAX_ATTEMPTS попыток.
+    ставится в очередь повторов (pending_files.json) — её разбирает launchd-агент
+    com.salnikov.1c-release-retry (run_once: 5 попыток с шагом 1 час).
     """
     if not new_rows:
         return []
