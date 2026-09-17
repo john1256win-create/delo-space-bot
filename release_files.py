@@ -18,7 +18,7 @@ import os
 import re
 import sys
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +34,7 @@ PENDING_FILE = DOWNLOAD_DIR / "pending_files.json"
 # 5 попыток с интервалом 1 час (заглушка «Ошибка на нашем сервере»).
 MAX_ATTEMPTS = 5
 RETRY_DELAY = 3600          # 1 час между попытками
+RETRY_TOLERANCE = 300       # допуск: запуск в :05 и :00 — это одна и та же попытка
 RETRY_LOCK = DOWNLOAD_DIR / ".retry.lock"
 
 
@@ -106,8 +107,9 @@ def release_retry_lock() -> None:
 def enqueue_pending(row: dict) -> None:
     """Ставит релиз в очередь на повтор (первая попытка уже была неудачной).
 
-    attempts = сколько попыток получить файл уже сделано. Первая попытка
-    (в download_all_news_files) уже провалилась, поэтому attempts=1.
+    attempts = сколько попыток получить файл уже сделано (первая — в
+    download_all_news_files). next_retry_at = плановое время следующей попытки,
+    т.е. ровно через RETRY_DELAY (1 час) — как требует постановка.
     """
     items = _load_pending()
     for it in items:
@@ -115,17 +117,23 @@ def enqueue_pending(row: dict) -> None:
             return                      # уже в очереди — не дублируем
     entry = dict(row)
     entry["attempts"] = 1
-    entry["next_retry_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry["next_retry_at"] = (datetime.now() + timedelta(seconds=RETRY_DELAY)).strftime(
+        "%Y-%m-%d %H:%M:%S")
     items.append(entry)
     _save_pending(items)
 
 
-def attempt_pending() -> tuple[list[Path], bool]:
+def attempt_pending(force: bool = False) -> tuple[list[Path], bool]:
     """Одна попытка скачать все отложенные файлы.
 
     Возвращает (скачанные файлы, есть ли ещё ожидающие).
     Всего делается до MAX_ATTEMPTS попыток (первая — в download_all_news_files,
     остальные — здесь). После исчерпания запись снимается, чтобы не зацикливаться.
+
+    Записи, у которых с прошлой попытки не прошёл час, пропускаются: повторы
+    запускаются и launchd'ом (:05), и из run_daily (:00, 7/9/11/13/15/17/19/21)
+    — без этого попытки тратились бы вдвое быстрее. force=True игнорирует
+    интервал (для ручного/тестового прогона).
     """
     items = _load_pending()
     if not items:
@@ -139,9 +147,23 @@ def attempt_pending() -> tuple[list[Path], bool]:
 
     downloaded: list[Path] = []
     keep: list[dict] = []
+    now = datetime.now()
     for row in items:
         done = int(row.get("attempts", 1))     # попыток уже сделано
         n = done + 1                            # номер текущей попытки
+
+        if not force and row.get("next_retry_at"):
+            try:
+                last = datetime.strptime(row["next_retry_at"], "%Y-%m-%d %H:%M:%S")
+                wait = RETRY_DELAY - (now - last).total_seconds()
+                if wait > RETRY_TOLERANCE:
+                    keep.append(row)            # час ещё не прошёл
+                    print(f"   ⏸ {row.get('product')} {row.get('version')}: "
+                          f"до следующей попытки {int(wait // 60)} мин — пропускаю")
+                    continue
+            except ValueError:
+                pass
+
         print(f"   🔎 Повтор «Новое в версии» для {row.get('product')} "
               f"{row.get('version')} (попытка {n}/{MAX_ATTEMPTS})...")
         fp, unavailable = download_news(session, row)
@@ -156,7 +178,8 @@ def attempt_pending() -> tuple[list[Path], bool]:
             print(f"      ⛔ Сервис недоступен, попыток исчерпано ({MAX_ATTEMPTS}) — снимаю")
             continue
         row["attempts"] = n
-        row["next_retry_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        row["next_retry_at"] = (now + timedelta(seconds=RETRY_DELAY)).strftime(
+            "%Y-%m-%d %H:%M:%S")
         keep.append(row)
         print(f"      ⏳ Сервис недоступен — остаётся в очереди "
               f"(сделано попыток {n}/{MAX_ATTEMPTS})")

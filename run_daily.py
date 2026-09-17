@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Ежедневный прогон: ИТС -> CSV -> diff -> отправка в Delo Space Info_Bot.
 
-Отдельно от основного мониторинга запускается цикл повторов для файлов
-«Новое в версии» (retry_files.py): если сервис releases.1c.ru отдал ошибку,
-он делает до 5 попыток с интервалом 1 час — независимо от расписания launchd.
+Файлы «Новое в версии» при недоступности сервиса releases.1c.ru попадают в
+очередь (downloads/pending_files.json), которую разбирает launchd-агент
+com.salnikov.1c-release-retry: раз в час, до 5 попыток на релиз.
 """
-import sys, asyncio, logging, subprocess, time
+import sys, asyncio, logging, time
 from pathlib import Path
 from uuid import UUID
 
@@ -16,32 +16,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 BOT_ID = "d2863b44-7aee-5a07-bc4c-9a6098b5696e"
 CHAT_ID = "5bf9bf2e-49eb-5099-85e4-1af65241a3b8"
-
-
-def start_retry_worker() -> None:
-    """Инициирует попытку получить отложенные «Новое в версии» до планового часа.
-
-    Если сервис releases.1c.ru лежал и файл не скачался, он попал в очередь
-    (pending_files.json). Штатно её разбирает launchd-агент
-    com.salnikov.1c-release-retry (раз в час, 5 попыток с шагом 1 час).
-    Здесь — один незапланированный прогон, чтобы не ждать до :05, если
-    сервис уже восстановился.
-    """
-    from release_files import pending_items
-    if not pending_items():
-        return
-    log = HERE / "downloads" / "retry_files.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        subprocess.Popen(
-            [sys.executable, str(HERE / "retry_files.py")],
-            stdout=open(log, "a"), stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        print(f"   🔁 Запущена внеплановая попытка «Новое в версии» "
-              f"(штатно — ежечасно по launchd), лог: {log}")
-    except Exception as e:
-        print(f"   ⚠ Не удалось запустить попытку: {e}")
 
 
 async def main():
@@ -152,11 +126,6 @@ async def main():
                     print(f"   ❌ Ошибка отправки файла {fp.name}: {fe}")
         finally:
             await b.shutdown()
-    
-    # Если какие-то «Новое в версии» не получены из-за ошибки сервиса
-    # releases.1c.ru — запускаем фоновый цикл повторов (5 попыток × 1 час).
-    # Проверяем независимо от того, были ли изменения в этом прогоне.
-    start_retry_worker()
     
     # Мониторинг v8.1c.ru/lawmonitor (временное решение)
     if ENABLE_LAWMONITOR:
