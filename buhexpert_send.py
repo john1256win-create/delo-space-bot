@@ -7,7 +7,7 @@ import asyncio
 from datetime import date, datetime
 from uuid import UUID
 
-from buhexpert_scraper import get_credentials, login, _make_session, fetch_event_content
+from buhexpert_scraper import get_credentials, login, logout, _make_session, fetch_event_content
 
 BOT_ID = "d2863b44-7aee-5a07-bc4c-9a6098b5696e"
 CHAT_BUHEXPERT = UUID("52d96a19-199e-56b0-9222-a6c2bf7b940f")  # канал «БухЭксперт»
@@ -99,13 +99,23 @@ async def send_message(body: str, bot=None, chat_id: UUID = CHAT_BUHEXPERT,
 
 
 def get_event_content_for(seminar: dict) -> str:
-    """Возвращает контент события (с авторизацией) или пустую строку."""
+    """Возвращает контент события (с авторизацией) или пустую строку.
+
+    Если выполнялся login() — по завершении разлогинивается, чтобы не
+    оставлять живую сессию на buhexpert8.ru.
+    """
     s = _make_session()
+    logged_in = False
     try:
-        if not login(s):
+        logged_in = login(s)
+        if not logged_in:
             return ""
         return fetch_event_content(s, seminar["url"])
     except Exception:
         return ""
     finally:
-        s.close()
+        try:
+            if logged_in:
+                logout(s)
+        finally:
+            s.close()

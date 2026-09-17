@@ -89,6 +89,38 @@ def _save_cookies(session: requests.Session):
         pickle.dump(session.cookies, f)
 
 
+def logout(session: requests.Session) -> bool:
+    """
+    Разлогинивается на buhexpert8.ru и очищает cookies.
+
+    Вызывать по завершении работы, если был выполнен login() — чтобы не
+    оставлять живую сессию на сервере. Серверный выход идёт через
+    wp-login.php?action=logout с nonce, который берётся со страницы сайта.
+
+    Возвращает True, если выход выполнен (cookies сброшены),
+    False — если запрос не удался (cookies оставляем как есть).
+    """
+    try:
+        r = session.get(LOGIN_URL, timeout=30, allow_redirects=True)
+        m = re.search(r"action=logout[^\"']*?[&?](?:amp;)?_wpnonce=([A-Za-z0-9]+)", r.text)
+        nonce = m.group(1) if m else ""
+        if not nonce:
+            return False
+        session.get(
+            f"https://buhexpert8.ru/wp-login.php?action=logout&_wpnonce={nonce}",
+            timeout=30, allow_redirects=True,
+        )
+    except Exception as e:
+        print(f"   ⚠ logout: {type(e).__name__}: {e}")
+        return False
+
+    session.cookies.clear()
+    # сохранённые cookies больше не актуальны — серверная сессия завершена
+    if COOKIE_FILE.exists():
+        COOKIE_FILE.unlink(missing_ok=True)
+    return True
+
+
 def login(session: requests.Session) -> bool:
     """
     Авторизация на buhexpert8.ru.

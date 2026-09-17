@@ -181,7 +181,8 @@ async def main_resend(target_date: str, interval: int) -> int:
     log(f"   сброшены отметки у {len(rows)} новостей → очередь: "
         f"{[x['id'] for x in bn.pending_news(conn)]}")
 
-    if not bs.login(session):
+    logged_in = bs.login(session)
+    if not logged_in:
         log("   ⚠ не удалось авторизоваться — обзоры будут неполными")
 
     from bot import get_bot
@@ -191,6 +192,9 @@ async def main_resend(target_date: str, interval: int) -> int:
         await process_news(conn, session, b, pause=interval)
     finally:
         await b.shutdown()
+        # закрываем сессию на сайте, если логинились
+        if logged_in and bs.logout(session):
+            log("   🔓 Разлогинились на buhexpert8.ru")
 
     log(f"📊 Итог: без уведомления={len(bn.unsent_news(conn))}, "
         f"без обзора={len(bn.unsent_digests(conn))}")
@@ -215,7 +219,8 @@ async def main_replay(target_date: str, interval: int) -> int:
         conn.close()
         return 0
 
-    if not bs.login(session):
+    logged_in = bs.login(session)
+    if not logged_in:
         log("   ⚠ не удалось авторизоваться — обзоры будут неполными")
 
     from bot import get_bot
@@ -242,6 +247,8 @@ async def main_replay(target_date: str, interval: int) -> int:
                 log(f"   ⚠ Обзор не собран (id={row['id']})")
     finally:
         await b.shutdown()
+        if logged_in and bs.logout(session):
+            log("   🔓 Разлогинились на buhexpert8.ru")
     conn.close()
     log("🔁 REPLAY завершён")
     return 0
@@ -273,8 +280,10 @@ async def main() -> int:
         bn.export_csv(conn)
 
     # ── Авторизация для обзоров ────────────────────────────
+    logged_in = False
     if bn.unsent_news(conn) or bn.unsent_digests(conn):
-        if not bs.login(session):
+        logged_in = bs.login(session)
+        if not logged_in:
             log("   ⚠ Не удалось авторизоваться на buhexpert8.ru — обзоры недоступны")
 
     from bot import get_bot
@@ -284,6 +293,9 @@ async def main() -> int:
         await process_news(conn, session, b)
     finally:
         await b.shutdown()
+        # закрываем сессию на сайте, если логинились
+        if logged_in and bs.logout(session):
+            log("   🔓 Разлогинились на buhexpert8.ru")
 
     bn.export_csv(conn)
     log(f"📊 Итог: всего={conn.execute('SELECT COUNT(*) FROM news').fetchone()[0]}, "
