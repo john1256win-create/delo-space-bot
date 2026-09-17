@@ -102,22 +102,6 @@ def num(v) -> str:
         return "—"
 
 
-# Символы, значимые для markdown-it (клиент Delo Space рендерит тело сообщения
-# как CommonMark: `.chat-message__text .markdown`, библиотека markdown-it).
-# Данные из БД вставляем в размеченный текст, поэтому экранируем.
-MD_SPECIAL = "*_`[]\\"
-
-
-def esc(s) -> str:
-    """Экранирует markdown-спецсимволы в пользовательских данных.
-
-    Нужно, чтобы название задачи со звёздочкой/бэктиком не ломало разметку
-    (например `1С_TK_v35.35` внутри слова markdown-it сам не трогает, но
-    одиночная `*` или `` ` `` изменит форматирование).
-    """
-    return "".join("\\" + c if c in MD_SPECIAL else c for c in (s or ""))
-
-
 def norm(s) -> str:
     """Нормализует пробелы: сжимает повторные и убирает краевые.
 
@@ -224,8 +208,8 @@ def build_report(conn: sqlite3.Connection, release: str, order: list[str]) -> st
         code_cut = -1
 
     lines = [
-        f"Релиз **{esc(release)}** — стартует период тестирования",
-        f"Задачи ниже приоритета «{esc(THRESHOLD_STATUS)}»: {len(selected)} из {len(tasks)}",
+        f"Релиз **{release}** — 📝 стартует период тестирования",
+        f"Задачи ниже приоритета «{THRESHOLD_STATUS}»: {len(selected)} из {len(tasks)}",
         "",
     ]
 
@@ -233,24 +217,26 @@ def build_report(conn: sqlite3.Connection, release: str, order: list[str]) -> st
         """Строки одной задачи; pos — номер в отчёте (0 — без нумерации, код-блок)."""
         ms = max_status(t)
         out = []
-        # 1) номер задачи — полужирный; название нормализуем и экранируем
-        head = f"**{esc(t['request_code'])}** — {esc(norm(t['request_name']))}"
-        out.append(f"{pos}\\) {head}" if pos else head)
+        # 1) номер задачи — полужирный. Скобку НЕ экранируем: правило списка в
+        # клиенте требует точку («[0-9]{1,9}\.»), поэтому «1)» списком не станет,
+        # а обратные слэши клиент не разэкранирует — они видны в чате как есть.
+        head = f"**{t['request_code']}** — {norm(t['request_name'])}"
+        out.append(f"{pos}) {head}" if pos else head)
         # 2) стрелка у пары план/факт: зелёная вниз (план>факт), красная вверх (план<факт)
         out.append(
-            f"Разработчик: {esc(norm(t['programmer']) or '—')} "
+            f"Разработчик: {norm(t['programmer']) or '—'} "
             f"(разр. {num(t['development_plan'])} / {num(t['development_actual'])} ч"
             f"{labor_arrow(t['development_plan'], t['development_actual'])})"
         )
         out.append(
-            f"Методолог: {esc(norm(t['methodologist']) or '—')} "
+            f"Методолог: {norm(t['methodologist']) or '—'} "
             f"(мет. {num(t['methodology_plan'])} / {num(t['methodology_actual'])} ч"
             f"{labor_arrow(t['methodology_plan'], t['methodology_actual'])})"
         )
         # 3) статус — полужирный; 4) максимальный статус — курсивом
-        tail = f"Статус: **{esc(t['last_status'] or '—')}**"
+        tail = f"Статус: **{t['last_status'] or '—'}**"
         if ms:
-            tail += f" | Макс.: *{esc(ms)}*"
+            tail += f" | Макс.: *{ms}*"
         out.append(tail)
         return out
 
@@ -258,10 +244,9 @@ def build_report(conn: sqlite3.Connection, release: str, order: list[str]) -> st
     normal = [t for t in selected if idx.get(t["last_status"], -1) >= code_cut]
 
     if in_code:
-        lines.append(f"Ниже статуса «{esc(CODE_BLOCK_STATUS)}» ({len(in_code)}) — как есть:")
-        # Ограда из 4 бэктиков: внутри код-блока разметка не рендерится и
-        # экранирование esc() видно как есть — поэтому содержимое НЕ экранируем.
-        # Эмодзи-стрелки внутри код-блока отображаются.
+        lines.append(f"Ниже статуса «{CODE_BLOCK_STATUS}» ({len(in_code)}) — как есть:")
+        # Ограда из 4 бэктиков: внутри код-блока разметка не рендерится,
+        # строки выводятся «как есть». Эмодзи-стрелки отображаются.
         lines.append("````")
         for t in in_code:
             lines.extend(task_lines(t, 0))
