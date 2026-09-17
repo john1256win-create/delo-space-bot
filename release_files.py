@@ -154,12 +154,12 @@ def attempt_pending(force: bool = False) -> tuple[list[Path], bool]:
 
         if not force and row.get("next_retry_at"):
             try:
-                last = datetime.strptime(row["next_retry_at"], "%Y-%m-%d %H:%M:%S")
-                wait = RETRY_DELAY - (now - last).total_seconds()
-                if wait > RETRY_TOLERANCE:
-                    keep.append(row)            # час ещё не прошёл
+                due = datetime.strptime(row["next_retry_at"], "%Y-%m-%d %H:%M:%S")
+                left = (due - now).total_seconds()
+                if left > RETRY_TOLERANCE:
+                    keep.append(row)            # срок ещё не наступил
                     print(f"   ⏸ {row.get('product')} {row.get('version')}: "
-                          f"до следующей попытки {int(wait // 60)} мин — пропускаю")
+                          f"до следующей попытки {int(left // 60)} мин — пропускаю")
                     continue
             except ValueError:
                 pass
