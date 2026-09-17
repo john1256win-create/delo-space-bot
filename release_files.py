@@ -8,12 +8,18 @@ release_files.py — построение ссылок на релизы и ск
 4. Скачивает файл (обычно news.htm) во временную папку
 5. Конвертирует HTML -> PDF (Chrome headless), т.к. встроенный просмотрщик
    Delo Space открывает PDF нативно, а HTML пришлось бы скачивать
+
+Если сервис файлов releases.1c.ru отдаёт заглушку «Ошибка на нашем сервере»
+(«временно недоступен»), релиз ставится в очередь повторов и retry_loop()
+делает до MAX_ATTEMPTS=5 попыток с интервалом RETRY_DELAY=1 час.
 """
 import json
 import os
 import re
 import sys
+import time
 import requests
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +30,12 @@ from html_pdf import html_file_to_pdf, HTML_TO_PDF_AVAILABLE
 
 DOWNLOAD_DIR = Path(__file__).parent / "downloads"
 PENDING_FILE = DOWNLOAD_DIR / "pending_files.json"
+
+# Повтор при недоступности сервиса файлов releases.1c.ru:
+# 5 попыток с интервалом 1 час (заглушка «Ошибка на нашем сервере»).
+MAX_ATTEMPTS = 5
+RETRY_DELAY = 3600          # 1 час между попытками
+RETRY_LOCK = DOWNLOAD_DIR / ".retry.lock"
 
 
 def _is_service_unavailable(txt: str) -> bool:
@@ -37,14 +49,121 @@ def _load_pending() -> list[dict]:
     if not PENDING_FILE.exists():
         return []
     try:
-        return json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+        items = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
     except Exception:
         return []
+    for it in items:
+        it.setdefault("attempts", 1)
+    return items
 
 
 def _save_pending(rows: list[dict]) -> None:
-    """Сохраняет отложенные релизы в PENDING_FILE."""
-    PENDING_FILE.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Сохраняет отложенные релизы (атомарно, чтобы не побить файл при гонке)."""
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PENDING_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, PENDING_FILE)
+
+
+def pending_items() -> list[dict]:
+    """Отложенные релизы, ожидающие восстановления сервиса."""
+    return _load_pending()
+
+
+def _key(row: dict) -> tuple:
+    """Ключ релиза для дедупликации отложенных записей."""
+    return (row.get("product", ""), row.get("version", ""))
+
+
+def acquire_retry_lock() -> bool:
+    """Захватывает lock цикла повторов, чтобы не запускать его параллельно.
+
+    launchd гоняет run_daily каждые 2 часа, а цикл повторов может работать дольше —
+    без lock два процесса дублировали бы попытки и отправку файлов.
+    """
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(RETRY_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            # lock есть: если процесс-владелец мёртв — снимаем и пробуем снова
+            try:
+                pid = int(RETRY_LOCK.read_text(encoding="utf-8").strip() or 0)
+                os.kill(pid, 0)
+                return False            # владелец жив — цикл уже идёт
+            except (ValueError, ProcessLookupError, OSError):
+                RETRY_LOCK.unlink(missing_ok=True)
+    return False
+
+
+def release_retry_lock() -> None:
+    """Освобождает lock цикла повторов."""
+    RETRY_LOCK.unlink(missing_ok=True)
+
+
+def enqueue_pending(row: dict) -> None:
+    """Ставит релиз в очередь на повтор (первая попытка уже была неудачной).
+
+    attempts = сколько попыток получить файл уже сделано. Первая попытка
+    (в download_all_news_files) уже провалилась, поэтому attempts=1.
+    """
+    items = _load_pending()
+    for it in items:
+        if _key(it) == _key(row):
+            return                      # уже в очереди — не дублируем
+    entry = dict(row)
+    entry["attempts"] = 1
+    entry["next_retry_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    items.append(entry)
+    _save_pending(items)
+
+
+def attempt_pending() -> tuple[list[Path], bool]:
+    """Одна попытка скачать все отложенные файлы.
+
+    Возвращает (скачанные файлы, есть ли ещё ожидающие).
+    Всего делается до MAX_ATTEMPTS попыток (первая — в download_all_news_files,
+    остальные — здесь). После исчерпания запись снимается, чтобы не зацикливаться.
+    """
+    items = _load_pending()
+    if not items:
+        return [], False
+
+    try:
+        session = _get_session()
+    except Exception as e:
+        print(f"   ⚠ Не удалось авторизоваться для повтора: {e}")
+        return [], True
+
+    downloaded: list[Path] = []
+    keep: list[dict] = []
+    for row in items:
+        done = int(row.get("attempts", 1))     # попыток уже сделано
+        n = done + 1                            # номер текущей попытки
+        print(f"   🔎 Повтор «Новое в версии» для {row.get('product')} "
+              f"{row.get('version')} (попытка {n}/{MAX_ATTEMPTS})...")
+        fp, unavailable = download_news(session, row)
+        if fp:
+            downloaded.append(fp)
+            print(f"      ✅ Скачан: {fp.name}")
+            continue
+        if not unavailable:
+            print("      ⏭ Ссылка «Новое в версии» не найдена — снимаю с повторов")
+            continue
+        if n >= MAX_ATTEMPTS:
+            print(f"      ⛔ Сервис недоступен, попыток исчерпано ({MAX_ATTEMPTS}) — снимаю")
+            continue
+        row["attempts"] = n
+        row["next_retry_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        keep.append(row)
+        print(f"      ⏳ Сервис недоступен — остаётся в очереди "
+              f"(сделано попыток {n}/{MAX_ATTEMPTS})")
+
+    _save_pending(keep)
+    return downloaded, bool(keep)
 
 
 def _clean_version(version: str) -> str:
@@ -194,47 +313,24 @@ def download_news(session: requests.Session, row: dict) -> tuple[Optional[Path],
 
 
 def download_all_news_files(new_rows: list[dict]) -> list[Path]:
-    """Скачивает «Новое в версии» для всех новых релизов.
+    """Скачивает «Новое в версии» для новых релизов.
 
     Если сервис файлов недоступен (заглушка «временно недоступен»), релиз
-    сохраняется в pending_files.json и будет повторён при следующем запуске
-    (launchd запускает run_daily каждые ~2 часа, т.е. повтор ~через 120 минут).
+    ставится в очередь повторов (pending_files.json) — повтор выполняет
+    retry_loop() через час, до MAX_ATTEMPTS попыток.
     """
-    # 1) Сначала пробуем докачать отложенные релизы (сервис мог восстановиться)
-    pending = _load_pending()
-    downloaded = []
-    if pending:
-        print(f"   🔁 Отложенных релизов (сервис был недоступен): {len(pending)}")
-        try:
-            session = _get_session()
-        except Exception as e:
-            print(f"   ⚠ Не удалось авторизоваться для отложенных: {e}")
-            session = None
-        if session is not None:
-            still_pending = []
-            for row in pending:
-                print(f"   🔎 Повтор «Новое в версии» для {row['product']} {row['version']}...")
-                fp, unavailable = download_news(session, row)
-                if fp:
-                    downloaded.append(fp)
-                    print(f"      ✅ Скачан (отложенный): {fp.name}")
-                elif unavailable:
-                    still_pending.append(row)
-                    print(f"      ⏳ Сервис всё ещё недоступен — оставляю в отложенных")
-                else:
-                    print(f"      ⏭ Ссылка «Новое в версии» не найдена (отложенный)")
-            _save_pending(still_pending)
-
-    # 2) Новые релизы из текущего diff
     if not new_rows:
-        return downloaded
+        return []
     try:
         session = _get_session()
     except Exception as e:
         print(f"   ⚠ Не удалось авторизоваться для скачивания: {e}")
-        return downloaded
+        for row in new_rows:
+            enqueue_pending(row)
+        print(f"   📌 Отложено до восстановления доступа: {len(new_rows)}")
+        return []
 
-    new_pending = []
+    downloaded: list[Path] = []
     for row in new_rows:
         print(f"   🔎 Ищу «Новое в версии» для {row['product']} {row['version']}...")
         fp, unavailable = download_news(session, row)
@@ -242,15 +338,57 @@ def download_all_news_files(new_rows: list[dict]) -> list[Path]:
             downloaded.append(fp)
             print(f"      ✅ Скачан: {fp.name}")
         elif unavailable:
-            new_pending.append(row)
-            print(f"      ⏳ Сервис файлов недоступен — откладываю (повтор через ~120 мин)")
+            enqueue_pending(row)
+            print(f"      ⏳ Сервис файлов недоступен — в очередь повторов "
+                  f"(через {RETRY_DELAY // 60} мин, до {MAX_ATTEMPTS} попыток)")
         else:
             print(f"      ⏭ Ссылка «Новое в версии» не найдена")
 
-    # 3) Сохраняем отложенные (добавляем к оставшимся старым)
-    if new_pending:
-        remaining = _load_pending() + new_pending
-        _save_pending(remaining)
-        print(f"   📌 Отложено файлов для повторной попытки: {len(new_pending)}")
-
     return downloaded
+
+
+def retry_loop(on_files=None) -> int:
+    """Повторяет попытки получить «Новое в версии» при недоступности сервиса.
+
+    Делает до MAX_ATTEMPTS попыток с интервалом RETRY_DELAY (1 час).
+    При появлении файлов вызывает on_files(список путей) — чтобы отправить их в чат.
+    Возвращает число успешно полученных файлов.
+
+    Запускается асинхронно из run_daily (в фоне), поэтому не блокирует
+    основной цикл мониторинга релизов.
+    """
+    if not _load_pending():
+        return 0
+
+    if not acquire_retry_lock():
+        print("   ⏸ Цикл повторов уже выполняется в другом процессе — выходим")
+        return 0
+
+    total = 0
+    try:
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            files, still = attempt_pending()
+            if files:
+                print(f"   ✅ Попытка {attempt}: получено файлов {len(files)}")
+                if on_files:
+                    try:
+                        on_files(files)
+                    except Exception as e:
+                        print(f"   ⚠ Не удалось отправить файлы в чат: {e}")
+                total += len(files)
+            else:
+                print(f"   ⏳ Попытка {attempt}/{MAX_ATTEMPTS}: файлов пока нет")
+            if not still:
+                print("   ✔ Очередь повторов пуста")
+                break
+            if attempt < MAX_ATTEMPTS:
+                print(f"   💤 Жду {RETRY_DELAY // 60} мин до следующей попытки "
+                      f"({attempt + 1}/{MAX_ATTEMPTS})...")
+                time.sleep(RETRY_DELAY)
+        else:
+            left = len(_load_pending())
+            if left:
+                print(f"   ⛔ {MAX_ATTEMPTS} попыток исчерпаны, осталось в очереди: {left}")
+    finally:
+        release_retry_lock()
+    return total
