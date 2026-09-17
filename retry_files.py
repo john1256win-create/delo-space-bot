@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-retry_files.py — цикл повторов для файлов «Новое в версии».
+retry_files.py — попытка получить файл «Новое в версии» из очереди повторов.
 
-Запускается из run_daily.py в фоне, когда сервис files.releases.1c.ru
-отдал заглушку «Ошибка на нашем сервере» и файл не скачался.
+Запускается двумя способами:
+  1) launchd-агентом com.salnikov.1c-release-retry — раз в час, с 00:05 до 23:05
+     (до 5 попыток на релиз, счётчик живёт в downloads/pending_files.json);
+  2) из run_daily.py (start_retry_worker) — внепланово, если сервис уже
+     восстановился и ждать планового часа незачем.
 
-Логика: до 5 попыток с интервалом 1 час. Как только файл получен —
+Появление очереди означает, что сервис files.releases.1c.ru отдал заглушку
+«Ошибка на нашем сервере» и файл не скачался. Как только файл получен —
 конвертируется в PDF и отправляется в Info_Bot (канал релизов).
 
-Процесс самостоятельный (start_new_session), поэтому переживает завершение
-run_daily; lock-файл в downloads/ не даёт запустить два цикла одновременно.
+Процесс короткоживущий (одна попытка, без sleep): долгоживущий цикл на Mac
+может умереть при перезагрузке или сне, а счётчик попыток должен сохраняться.
 """
 import asyncio
 import sys
@@ -49,17 +53,17 @@ async def send_files(files: list[Path]) -> None:
 
 
 def main() -> int:
-    from release_files import retry_loop, pending_items, MAX_ATTEMPTS
+    from release_files import run_once, pending_items, MAX_ATTEMPTS
 
     pending = pending_items()
     if not pending:
-        print("[retry] Очередь повторов пуста — выходим")
+        print("[retry] Очередь пуста — выходим")
         return 0
 
-    print(f"[retry] В очереди релизов: {len(pending)} — "
-          f"до {MAX_ATTEMPTS} попыток с интервалом 1 час")
+    done = max(int(i.get("attempts", 1)) for i in pending)
+    print(f"[retry] В очереди релизов: {len(pending)} — попыток сделано {done}/{MAX_ATTEMPTS}")
 
-    total = retry_loop(on_files=lambda files: asyncio.run(send_files(files)))
+    total = run_once(on_files=lambda files: asyncio.run(send_files(files)))
 
     left = pending_items()
     print(f"[retry] Итог: получено файлов {total}, осталось в очереди {len(left)}")

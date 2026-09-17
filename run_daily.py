@@ -19,11 +19,13 @@ CHAT_ID = "5bf9bf2e-49eb-5099-85e4-1af65241a3b8"
 
 
 def start_retry_worker() -> None:
-    """Запускает фоновый цикл повторов «Новое в версии» (отдельным процессом).
+    """Инициирует попытку получить отложенные «Новое в версии» до планового часа.
 
-    Нужен, когда файл не скачался из-за ошибки сервиса releases.1c.ru:
-    retry_files.py повторит попытку через час (до 5 раз), не дожидаясь
-    следующего запуска launchd (каждые 2 часа).
+    Если сервис releases.1c.ru лежал и файл не скачался, он попал в очередь
+    (pending_files.json). Штатно её разбирает launchd-агент
+    com.salnikov.1c-release-retry (раз в час, 5 попыток с шагом 1 час).
+    Здесь — один незапланированный прогон, чтобы не ждать до :05, если
+    сервис уже восстановился.
     """
     from release_files import pending_items
     if not pending_items():
@@ -34,12 +36,12 @@ def start_retry_worker() -> None:
         subprocess.Popen(
             [sys.executable, str(HERE / "retry_files.py")],
             stdout=open(log, "a"), stderr=subprocess.STDOUT,
-            start_new_session=True,          # переживает завершение run_daily
+            start_new_session=True,
         )
-        print(f"   🔁 Запущен фоновый цикл повторов «Новое в версии» "
-              f"(до 5 попыток, интервал 1 час), лог: {log}")
+        print(f"   🔁 Запущена внеплановая попытка «Новое в версии» "
+              f"(штатно — ежечасно по launchd), лог: {log}")
     except Exception as e:
-        print(f"   ⚠ Не удалось запустить цикл повторов: {e}")
+        print(f"   ⚠ Не удалось запустить попытку: {e}")
 
 
 async def main():

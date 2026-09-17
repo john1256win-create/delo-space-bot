@@ -17,7 +17,6 @@ import json
 import os
 import re
 import sys
-import time
 import requests
 from datetime import datetime
 from pathlib import Path
@@ -347,48 +346,43 @@ def download_all_news_files(new_rows: list[dict]) -> list[Path]:
     return downloaded
 
 
-def retry_loop(on_files=None) -> int:
-    """Повторяет попытки получить «Новое в версии» при недоступности сервиса.
+def run_once(on_files=None) -> int:
+    """Делает ОДНУ попытку получить отложенные файлы.
 
-    Делает до MAX_ATTEMPTS попыток с интервалом RETRY_DELAY (1 час).
-    При появлении файлов вызывает on_files(список путей) — чтобы отправить их в чат.
-    Возвращает число успешно полученных файлов.
+    Вызывается по расписанию launchd (раз в час, см. agent
+    com.salnikov.1c-release-retry) — поэтому не содержит sleep и не висит
+    процессом: счётчик попыток живёт в pending_files.json, а после
+    MAX_ATTEMPTS запись снимается. Это надёжнее долгоживущего процесса,
+    который может умереть при перезагрузке или сне Mac.
 
-    Запускается асинхронно из run_daily (в фоне), поэтому не блокирует
-    основной цикл мониторинга релизов.
+    При появлении файлов вызывает on_files(список путей) — для отправки в чат.
+    Возвращает число полученных файлов.
     """
     if not _load_pending():
         return 0
 
     if not acquire_retry_lock():
-        print("   ⏸ Цикл повторов уже выполняется в другом процессе — выходим")
+        print("   ⏸ Попытка уже выполняется в другом процессе — выходим")
         return 0
 
-    total = 0
     try:
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            files, still = attempt_pending()
-            if files:
-                print(f"   ✅ Попытка {attempt}: получено файлов {len(files)}")
-                if on_files:
-                    try:
-                        on_files(files)
-                    except Exception as e:
-                        print(f"   ⚠ Не удалось отправить файлы в чат: {e}")
-                total += len(files)
+        files, still = attempt_pending()
+        n = len(files)
+        if n and on_files:
+            try:
+                on_files(files)
+            except Exception as e:
+                print(f"   ⚠ Не удалось отправить файлы в чат: {e}")
+        if still:
+            left = _load_pending()
+            done = max(int(i.get("attempts", 1)) for i in left)
+            if done < MAX_ATTEMPTS:
+                print(f"   💤 Следующая попытка — через час "
+                      f"({done}/{MAX_ATTEMPTS} попыток сделано)")
             else:
-                print(f"   ⏳ Попытка {attempt}/{MAX_ATTEMPTS}: файлов пока нет")
-            if not still:
-                print("   ✔ Очередь повторов пуста")
-                break
-            if attempt < MAX_ATTEMPTS:
-                print(f"   💤 Жду {RETRY_DELAY // 60} мин до следующей попытки "
-                      f"({attempt + 1}/{MAX_ATTEMPTS})...")
-                time.sleep(RETRY_DELAY)
+                print(f"   ⛔ Попытки исчерпаны ({MAX_ATTEMPTS})")
         else:
-            left = len(_load_pending())
-            if left:
-                print(f"   ⛔ {MAX_ATTEMPTS} попыток исчерпаны, осталось в очереди: {left}")
+            print("   ✔ Очередь повторов пуста")
+        return n
     finally:
         release_retry_lock()
-    return total
