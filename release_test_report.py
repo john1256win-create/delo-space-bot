@@ -9,9 +9,13 @@ release_test_report.py — отчёт по задачам релиза, когд
 
 Формат строки задачи:
   Номер — название
-  Разработчик: ФИО (разр. план / факт ч)
-  Методолог: ФИО (мет. план / факт ч)
-  Статус: <последний>  |  Макс.: <максимальный, если отличается>
+  Разработчик: ФИО (разр. план / факт ч) со стрелкой
+  Методолог: ФИО (мет. план / факт ч) со стрелкой
+  Статус: <последний> | Макс.: <максимальный, если отличается>
+
+Задачи сортируются по приоритету статуса (порядок из фильтра Web UI). Задачи
+со статусом раньше «Готова к включению в релиз» собираются в один блок как код
+(без нумерации и оформления) — там разметка не рендерится.
 
 Данные — напрямую из SQLite портфеля (не через API: API может быть остановлен,
 а отчёт должен уходить по расписанию). Порядок статусов парсится из
@@ -64,6 +68,10 @@ FALLBACK_STATUS_ORDER = [
 
 # Порог: «Ожидает работу QA» — отправляем задачи со статусом РАНЬШЕ него.
 THRESHOLD_STATUS = "Ожидает работу QA"
+
+# Задачи со статусом РАНЬШЕ этого (включая более ранние этапы) выводятся одним
+# блоком как код, без нумерации и оформления.
+CODE_BLOCK_STATUS = "Готова к включению в релиз"
 
 # Личный чат пользователя в Delo Space (HUID 481cea26-4e3f-55d5-8260-ad05f1d3dc6c,
 # получен через bot.personal_chat; бот не может создать чат первым).
@@ -205,25 +213,36 @@ def build_report(conn: sqlite3.Connection, release: str, order: list[str]) -> st
     if not selected:
         return None
 
+    # Сортировка по приоритету статуса (индекс в STATUS_ORDER), внутри статуса —
+    # по номеру задачи, чтобы порядок был стабильным между прогонами.
+    selected.sort(key=lambda t: (idx.get(t["last_status"], -1), t["request_code"]))
+
+    # Задачи ниже статуса «Готова к включению в релиз» — в один блок как код.
+    code_cut = idx.get(CODE_BLOCK_STATUS)
+    if code_cut is None:
+        print(f"⚠ Статус «{CODE_BLOCK_STATUS}» не найден в STATUS_ORDER")
+        code_cut = -1
+
     lines = [
         f"Релиз **{esc(release)}** — стартует период тестирования",
         f"Задачи ниже приоритета «{esc(THRESHOLD_STATUS)}»: {len(selected)} из {len(tasks)}",
         "",
     ]
-    for i, t in enumerate(selected, 1):
+
+    def task_lines(t, pos: int) -> list[str]:
+        """Строки одной задачи; pos — номер в отчёте (0 — без нумерации, код-блок)."""
         ms = max_status(t)
-        # Номер: экранируем «)», иначе markdown-it превратит строку в <ol><li>.
-        # Ведущих пробелов НЕ ставим — markdown их съедает; переносы строк
-        # сохраняет CSS клиента (`.chat-message__text { white-space: pre-wrap }`).
+        out = []
         # 1) номер задачи — полужирный; название нормализуем и экранируем
-        lines.append(f"{i}\\) **{esc(t['request_code'])}** — {esc(norm(t['request_name']))}")
-        # 2) стрелка рядом с парой план/факт: зелёная вниз (план>факт), красная вверх (план<факт)
-        lines.append(
+        head = f"**{esc(t['request_code'])}** — {esc(norm(t['request_name']))}"
+        out.append(f"{pos}\\) {head}" if pos else head)
+        # 2) стрелка у пары план/факт: зелёная вниз (план>факт), красная вверх (план<факт)
+        out.append(
             f"Разработчик: {esc(norm(t['programmer']) or '—')} "
             f"(разр. {num(t['development_plan'])} / {num(t['development_actual'])} ч"
             f"{labor_arrow(t['development_plan'], t['development_actual'])})"
         )
-        lines.append(
+        out.append(
             f"Методолог: {esc(norm(t['methodologist']) or '—')} "
             f"(мет. {num(t['methodology_plan'])} / {num(t['methodology_actual'])} ч"
             f"{labor_arrow(t['methodology_plan'], t['methodology_actual'])})"
@@ -232,7 +251,25 @@ def build_report(conn: sqlite3.Connection, release: str, order: list[str]) -> st
         tail = f"Статус: **{esc(t['last_status'] or '—')}**"
         if ms:
             tail += f" | Макс.: *{esc(ms)}*"
-        lines.append(tail)
+        out.append(tail)
+        return out
+
+    in_code = [t for t in selected if idx.get(t["last_status"], -1) < code_cut]
+    normal = [t for t in selected if idx.get(t["last_status"], -1) >= code_cut]
+
+    if in_code:
+        lines.append(f"Ниже статуса «{esc(CODE_BLOCK_STATUS)}» ({len(in_code)}) — как есть:")
+        # Ограда из 4 бэктиков: внутри код-блока разметка не рендерится и
+        # экранирование esc() видно как есть — поэтому содержимое НЕ экранируем.
+        # Эмодзи-стрелки внутри код-блока отображаются.
+        lines.append("````")
+        for t in in_code:
+            lines.extend(task_lines(t, 0))
+        lines.append("````")
+        lines.append("")
+
+    for i, t in enumerate(normal, 1):
+        lines.extend(task_lines(t, i))
         lines.append("")
 
     projects = ", ".join(sorted({t["project_code"] for t in selected}))
@@ -275,22 +312,39 @@ def chunk(text: str, size: int = 3500) -> list[str]:
     Строку длиннее size (в отчёте это может дать очень длинное название задачи)
     режем жёстко — иначе часть превысит лимит BotX и сообщение не отправится.
     Пустые части не возвращаются.
+
+    Код-блок (ограда из 4 бэктиков) не разрывается: если граница дроби попадает
+    внутрь блока, текущая часть закрывается оградой, а следующая открывается
+    заново — иначе остаток блока отрендерится как обычный текст с сырыми «**»/«\\*».
     """
+    FENCE = "````"
+
+    def _flush(buf: str) -> tuple[str, str]:
+        """Отдаёт готовую часть и затравку следующей, не разрывая код-блок.
+
+        Если в buf осталась незакрытая ограда (мы внутри код-блока) — текущая
+        часть закрывается оградой, а следующая начинается с открывающей.
+        """
+        if buf.count(FENCE) % 2:
+            return (buf.rstrip() + "\n" + FENCE).rstrip(), FENCE + "\n"
+        return buf.rstrip(), ""
+
     out: list[str] = []
     cur = ""
     for line in text.split("\n"):
         while len(line) > size:
-            if cur:
-                out.append(cur.rstrip())
-                cur = ""
+            part, cur = _flush(cur)
+            if part:
+                out.append(part)
             out.append(line[:size])
             line = line[size:]
         if cur and len(cur) + len(line) + 1 > size:
-            out.append(cur.rstrip())
-            cur = ""
+            part, cur = _flush(cur)
+            out.append(part)
         cur += line + "\n"
     if cur.strip():
-        out.append(cur.rstrip())
+        part, _ = _flush(cur)
+        out.append(part)
     return [p for p in out if p.strip()]
 
 
