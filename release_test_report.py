@@ -160,9 +160,14 @@ def build_report(conn: sqlite3.Connection, release: str, order: list[str]) -> st
         return None
 
     # Актуальные задачи релиза (последняя версия по (request_code, project_code)) —
-    # та же логика, что в release_tasks() бэкенда.
+    # та же логика, что в release_tasks() бэкенда. LEFT JOIN к look-трудозатратам:
+    # fact_dev — часы разработки ИМЕННО в этом релизе (task_effort_by_release).
     tasks = conn.execute(
-        """SELECT s.* FROM task_slices s
+        """SELECT s.*, e.fact_dev AS fact_dev
+           FROM task_slices s
+           LEFT JOIN task_effort_by_release e
+                  ON e.request_code = s.request_code
+                 AND e.release_name = s.release_name
            WHERE s.release_name = ?
              AND s.task_id = (SELECT MAX(t2.task_id) FROM task_slices t2
                               WHERE t2.request_code = s.request_code
@@ -222,18 +227,29 @@ def build_report(conn: sqlite3.Connection, release: str, order: list[str]) -> st
         # а обратные слэши клиент не разэкранирует — они видны в чате как есть.
         head = f"**{t['request_code']}** — {norm(t['request_name'])}"
         out.append(f"{pos}) {head}" if pos else head)
-        # 2) стрелка у пары план/факт: зелёная вниз (план>факт), красная вверх (план<факт)
-        out.append(
+        # 2) Разработка: план — из задачи; факт — ЧАСЫ ЭТОГО РЕЛИЗА
+        # (task_effort_by_release.fact_dev, как колонка «Разр» в Web UI).
+        # Стрелка считается по этой же паре план/факт релиза.
+        # «Всего» выносим за скобки — это общий факт по задаче (development_actual),
+        # он показывает часы и в других релизах. Показываем, когда отличается
+        # от факта релиза, чтобы не дублировать одно и то же число.
+        plan, fact_rel = t["development_plan"], t["fact_dev"]
+        dev = (
             f"Разработчик: {norm(t['programmer']) or '—'} "
-            f"(разр. {num(t['development_plan'])} / {num(t['development_actual'])} ч"
-            f"{labor_arrow(t['development_plan'], t['development_actual'])})"
+            f"(разр. {num(plan)} / {num(fact_rel)} ч{labor_arrow(plan, fact_rel)})"
         )
+        total = t["development_actual"]
+        if total is not None and (fact_rel is None or round(total, 1) != round(fact_rel, 1)):
+            dev += f" Всего {num(total)} ч"
+        out.append(dev)
+        # 3) Методология: per-release разбивки в данных НЕТ (look-файл содержит
+        # только «Факт разработки»), поэтому план/факт берём из задачи целиком.
         out.append(
             f"Методолог: {norm(t['methodologist']) or '—'} "
             f"(мет. {num(t['methodology_plan'])} / {num(t['methodology_actual'])} ч"
             f"{labor_arrow(t['methodology_plan'], t['methodology_actual'])})"
         )
-        # 3) статус — полужирный; 4) максимальный статус — курсивом
+        # 4) статус — полужирный; 5) максимальный статус — курсивом
         tail = f"Статус: **{t['last_status'] or '—'}**"
         if ms:
             tail += f" | Макс.: *{ms}*"
