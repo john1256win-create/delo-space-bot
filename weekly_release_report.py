@@ -252,9 +252,12 @@ def build_task_groups(conn: sqlite3.Connection, rel: dict) -> list[list[str]]:
                 f"(разр. {num_ru(plan)} / {num_ru(fact_rel)} ч)"
                 f"{labor_arrow(plan, fact_rel)}"
             )
-            # «Всего» — общий факт по задаче; показываем, когда отличается от релиза.
-            if total is not None and (fact_rel is None
-                                      or round(float(total), 1) != round(float(fact_rel), 1)):
+            # «Всего» — общий факт по задаче; показываем, когда он ОСМЫСЛЕН:
+            # есть значение И отличается от факта релиза. При fact_dev=None (часов
+            # по релизу в look-выгрузке нет) «Всего 0 ч» было бы шумом.
+            if total is not None and float(total) > 0 and (
+                fact_rel is None or round(float(total), 1) != round(float(fact_rel), 1)
+            ):
                 dev += f" Всего {num_ru(total)} ч"
             block.append(dev)
             block.append(
