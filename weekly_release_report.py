@@ -40,9 +40,10 @@ from release_test_report import (  # noqa: E402
     PORTFOLIO_DB,
     chunk,
     labor_arrow,
+    load_status_order,
+    norm,
     num,
 )
-from release_milestones import STATUS_ORDER as MILESTONE_STATUS_ORDER  # noqa: E402
 
 # ── Пять систем, попадающих в отчёт (требование пользователя) ──────────────
 TARGET_SYSTEMS = [
@@ -147,26 +148,28 @@ def release_tasks(conn: sqlite3.Connection, release: str) -> list[dict]:
     return [best[c] for c in sorted(best)]
 
 
-def _status_block(counter) -> list[str]:
-    """Статусы в порядке STATUS_ORDER (как в контрольных точках), как есть."""
-    parts = []
-    for status in MILESTONE_STATUS_ORDER:
-        n = counter.get(status, 0)
-        if n:
-            parts.append(f"{status}: {n}")
-    # Незнакомые статусы — в конце, чтобы новые не терялись.
-    known = set(MILESTONE_STATUS_ORDER)
-    for status, n in sorted(counter.items()):
-        if status not in known:
-            parts.append(f"{status}: {n}")
-    return parts
+def num_ru(v) -> str:
+    """Округление вверх до 1 знака + русский десятичный разделитель (запятая)."""
+    return num(v).replace(".", ",")
 
 
-def build_release_block(conn: sqlite3.Connection, rel: dict, today: date) -> str | None:
-    """Блок отчёта по одному релизу: статистика + задачи по статусам."""
+def _status_line(last: str, mx: str | None) -> str:
+    """Строка статуса: текущий | максимальный (если отличается)."""
+    line = f"Статус: **{last or '—'}**"
+    if mx:
+        line += f" | Макс.: *{mx}*"
+    return line
+
+
+def build_release_block(conn: sqlite3.Connection, rel: dict, today: date) -> list[str]:
+    """Сообщение(я) по одному релизу: статистика релиза + расшифровка задач.
+
+    Возвращает список частей: обычно одна, но если релиз не влезает в лимит BotX,
+    текст делится по границам блоков «Методолог - …» (задача не разрывается).
+    """
     tasks = release_tasks(conn, rel["release_name"])
     if not tasks:
-        return None
+        return []
 
     plan = sum(t.get("development_plan") or 0 for t in tasks)
     fact = sum(t.get("fact_dev") or 0 for t in tasks)
@@ -176,54 +179,141 @@ def build_release_block(conn: sqlite3.Connection, rel: dict, today: date) -> str
     for t in tasks:
         by_sys[t["system_name"]] = by_sys.get(t["system_name"], 0) + 1
 
-    lines = [
-        "─────────────────────────────",
-        f"🔄 **{rel['release_name']}** — стадия: *{rel['stage']}*",
+    header = [
+        f"📈 **{rel['release_name']}** — стадия: *{rel['stage']}*",
         f"Разработка: {_fmt_d(rel.get('dev_start'))} → {_fmt_d(rel.get('dev_end'))} | "
         f"Тест: {_fmt_d(rel.get('test_start'))} → {_fmt_d(rel.get('test_end'))} | "
         f"Накат: {_fmt_d(rel.get('rollout_date'))}",
-        "",
         f"📦 Задач (5 систем): {len(tasks)}",
     ]
     for sys_name in TARGET_SYSTEMS:
         if by_sys.get(sys_name):
             # Без отступа пробелами: клиент Delo Space ведущие пробелы съедает,
             # отступ не отобразится, а двойной пробел после «•» попадёт в текст.
-            lines.append(f"• {sys_name}: {by_sys[sys_name]}")
-    lines.append(
-        f"⏱ Часы разработки: план {num(plan)} / факт {num(fact)} ч"
+            header.append(f"• {sys_name}: {by_sys[sys_name]}")
+    header.append(
+        f"⏱ Часы разработки: план {num_ru(plan)} / факт {num_ru(fact)} ч"
         f"{labor_arrow(plan, fact)}"
     )
 
-    counter: dict[str, int] = {}
-    for t in tasks:
-        st = (t.get("last_status") or "").strip()
+    groups = build_task_groups(conn, rel)
+    return split_release_message(header, groups)
+
+
+def build_task_groups(conn: sqlite3.Connection, rel: dict) -> list[list[str]]:
+    """Блоки задач, сгруппированные по методологу (каждый блок — список строк).
+
+    Возвращает СПИСОК блоков (не плоский список): по одному на методолога, начиная
+    со строки «Методолог - ФИО:» и её задачами. Такая структура нужна, чтобы делить
+    большое сообщение только по границам методологов, не разрывая задачу посередине.
+    """
+    tasks = release_tasks(conn, rel["release_name"])
+    if not tasks:
+        return []
+
+    order = load_status_order()
+    idx = {s: i for i, s in enumerate(order)}
+    st_map: dict[str, set] = {}
+    for sr in conn.execute(
+        "SELECT request_code, last_status FROM task_slices WHERE release_name = ?",
+        (rel["release_name"],),
+    ):
+        st = (sr["last_status"] or "").strip()
         if st:
-            counter[st] = counter.get(st, 0) + 1
-    block = _status_block(counter)
-    if block:
-        lines += ["", "📊 Задачи по статусам:"] + block
-    return "\n".join(lines)
+            st_map.setdefault(sr["request_code"], set()).add(st)
+
+    def max_status(code: str, last: str) -> str | None:
+        sts = st_map.get(code) or ({last} if last else set())
+        best, best_i = None, -2
+        for s in sts:
+            i = idx.get(s, -1)
+            if i > best_i:
+                best, best_i = s, i
+        return None if best == last else best
+
+    groups: dict[str, list[dict]] = {}
+    for t in tasks:
+        groups.setdefault((t.get("methodologist") or "").strip(), []).append(t)
+
+    # Методологи по алфавиту; «без методолога» — в конце.
+    names = sorted(groups, key=lambda n: (not n, n))
+
+    out: list[list[str]] = []
+    for name in names:
+        block = [f"Методолог - {name}:" if name else "Методолог - (не указан):"]
+        items = sorted(groups[name], key=lambda t: t["request_code"])
+        for i, t in enumerate(items, 1):
+            plan, fact_rel = t.get("development_plan"), t.get("fact_dev")
+            total = t.get("development_actual")
+            last = (t.get("last_status") or "").strip()
+            block.append(f"{i}) **{t['request_code']}** — {norm(t['request_name'])}")
+            dev = (
+                f"Разработчик: {norm(t.get('programmer')) or '—'} "
+                f"(разр. {num_ru(plan)} / {num_ru(fact_rel)} ч)"
+                f"{labor_arrow(plan, fact_rel)}"
+            )
+            # «Всего» — общий факт по задаче; показываем, когда отличается от релиза.
+            if total is not None and (fact_rel is None
+                                      or round(float(total), 1) != round(float(fact_rel), 1)):
+                dev += f" Всего {num_ru(total)} ч"
+            block.append(dev)
+            block.append(
+                f"Методолог: (мет. {num_ru(t.get('methodology_plan'))} / "
+                f"{num_ru(t.get('methodology_actual'))} ч)"
+            )
+            block.append(_status_line(last, max_status(t["request_code"], last)))
+        out.append(block)
+    return out
 
 
-def build_report(conn: sqlite3.Connection, today: date) -> str:
-    """Полный текст отчёта по всем активным релизам."""
+def build_report(conn: sqlite3.Connection, today: date) -> list[str]:
+    """Отчёт по активным релизам: ОДИН релиз = ОДНО сообщение (или несколько частей)."""
     releases = load_active_releases(conn, today)
-    lines = [
-        f"📈 **Недельный отчёт по релизам** — {today:%d.%m.%Y}",
-        f"Активных релизов (стадии 1–2): {len(releases)}",
-        f"Системы: {', '.join(TARGET_SYSTEMS)}",
-    ]
     if not releases:
-        lines.append("")
-        lines.append("Активных релизов нет.")
-        return "\n".join(lines)
-
+        return [
+            f"📈 **Недельный отчёт по релизам** — {today:%d.%m.%Y}\n"
+            f"Активных релизов (стадии 1–2) нет."
+        ]
+    out: list[str] = []
     for rel in releases:
-        block = build_release_block(conn, rel, today)
-        if block:
-            lines += ["", block]
-    return "\n".join(lines)
+        out.extend(build_release_block(conn, rel, today))
+    return out
+
+
+def split_release_message(header: list[str], groups: list[list[str]],
+                          limit: int = PART_LIMIT) -> list[str]:
+    """Делит сообщение релиза по границам блоков «Методолог - …».
+
+    Задача никогда не разрывается посередине: режем только между методологами.
+    Если один блок методолога сам не влезает в лимит — режем его по задачам
+    (`chunk`), чтобы сообщение вообще отправилось (лимит BotX ~4000).
+    В частях-продолжениях заголовок повторяется с пометкой «продолжение».
+    """
+    head = "\n".join(header)
+    tail_mark = "\n(продолжение)"
+    # Первая строка — название релиза; её же повторяем в продолжениях.
+    first_line = header[0]
+
+    out: list[str] = []
+    cur = head
+    for g in groups:
+        block = "\n".join(g)
+        if len(cur) + 1 + len(block) <= limit:
+            cur += "\n" + block
+            continue
+        if cur.strip():
+            out.append(cur)
+        if len(block) + len(first_line) + len(tail_mark) + 2 > limit:
+            # Блок методолога сам слишком велик — режем по задачам.
+            for i, piece in enumerate(chunk(block, limit - len(first_line) - len(tail_mark) - 2)):
+                pref = first_line + (tail_mark if (i or out) else "")
+                out.append(f"{pref}\n{piece}")
+            cur = ""
+        else:
+            cur = first_line + tail_mark + "\n" + block
+    if cur.strip():
+        out.append(cur)
+    return [p for p in out if p.strip()]
 
 
 async def send_to_me(parts: list[str]) -> None:
@@ -261,22 +351,33 @@ def main() -> int:
     conn = sqlite3.connect(f"file:{PORTFOLIO_DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        text = build_report(conn, today)
+        messages = build_report(conn, today)
     finally:
         conn.close()
 
+    # Уже готовые сообщения (build_report сам делит по границам методологов).
+    # Повторно дробить нельзя: часть ровно в PART_LIMIT символов chunk() разрежет
+    # и оставит крошечный хвост-огрызок. Делим только то, что реально превышает лимит.
+    parts: list[str] = []
+    for msg in messages:
+        if len(msg) <= PART_LIMIT:
+            parts.append(msg)
+        else:
+            parts.extend(chunk(msg, PART_LIMIT))
+
     if args.dry_run:
+        for i, p in enumerate(parts, 1):
+            print("─" * 60)
+            print(f"— сообщение {i}/{len(parts)} ({len(p)} символов) —")
+            print(p)
         print("─" * 60)
-        print(text)
-        print("─" * 60)
-        print(f"[dry-run] частей: {len(chunk(text, PART_LIMIT))}, символов: {len(text)}")
+        print(f"[dry-run] сообщений: {len(parts)}, символов: {sum(len(p) for p in parts)}")
         return 0
 
     import asyncio
 
-    parts = chunk(text, PART_LIMIT)
     asyncio.run(send_to_me(parts))
-    print(f"✅ Отправлено в личный чат: частей {len(parts)}")
+    print(f"✅ Отправлено в личный чат: сообщений {len(parts)} (релизов {len(messages)})")
     return 0
 
 
