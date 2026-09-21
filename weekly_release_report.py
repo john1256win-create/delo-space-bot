@@ -187,7 +187,9 @@ def build_release_block(conn: sqlite3.Connection, rel: dict, today: date) -> str
     ]
     for sys_name in TARGET_SYSTEMS:
         if by_sys.get(sys_name):
-            lines.append(f"   • {sys_name}: {by_sys[sys_name]}")
+            # Без отступа пробелами: клиент Delo Space ведущие пробелы съедает,
+            # отступ не отобразится, а двойной пробел после «•» попадёт в текст.
+            lines.append(f"• {sys_name}: {by_sys[sys_name]}")
     lines.append(
         f"⏱ Часы разработки: план {num(plan)} / факт {num(fact)} ч"
         f"{labor_arrow(plan, fact)}"
