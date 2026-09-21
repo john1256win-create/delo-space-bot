@@ -377,7 +377,7 @@ def main() -> int:
     import asyncio
 
     asyncio.run(send_to_me(parts))
-    print(f"✅ Отправлено в личный чат: сообщений {len(parts)} (релизов {len(messages)})")
+    print(f"✅ Отправлено в личный чат: сообщений {len(parts)}")
     return 0
 
 
