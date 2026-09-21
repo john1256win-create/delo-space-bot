@@ -34,3 +34,4 @@ Thumbs.db
 
 # Логи
 *.log
+data/weekly_reports_sent.json
