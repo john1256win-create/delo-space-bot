@@ -240,7 +240,9 @@ def build_task_groups(conn: sqlite3.Connection, rel: dict) -> list[list[str]]:
 
     out: list[list[str]] = []
     for name in names:
-        block = [f"Методолог - {name}:" if name else "Методолог - (не указан):"]
+        # Заголовок группы: пиктограмма 🧠 + весь текст полужирным (требование пользователя).
+        label = f"Методолог - {name}:" if name else "Методолог - (не указан):"
+        block = [f"🧠 **{label}**"]
         items = sorted(groups[name], key=lambda t: t["request_code"])
         for i, t in enumerate(items, 1):
             plan, fact_rel = t.get("development_plan"), t.get("fact_dev")
