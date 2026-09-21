@@ -27,7 +27,7 @@ weekly_release_report.py — еженедельный отчёт по актив
 import argparse
 import sqlite3
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -37,12 +37,10 @@ sys.path.insert(0, str(HERE))
 # округление часов, нормализация пробелов, стрелки план/факт и дробление текста.
 from release_test_report import (  # noqa: E402
     MY_CHAT_ID,
+    PORTFOLIO_DB,
     chunk,
     labor_arrow,
-    load_status_order,
-    norm,
     num,
-    PORTFOLIO_DB,
 )
 from release_milestones import STATUS_ORDER as MILESTONE_STATUS_ORDER  # noqa: E402
 
