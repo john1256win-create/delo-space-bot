@@ -392,10 +392,14 @@ def build_dev_stats_block(conn: sqlite3.Connection, rel: dict,
                           reasons: list[str] | None = None) -> list[str]:
     """Сообщение-статистика по разработчикам на контрольной точке.
 
-    Состав: заголовок релиза + стадия, строка дат, количество разработчиков
-    и задач, затем по строке на разработчика (задач, план/факт часов со
-    стрелкой), в конце — итог. Методологи не упоминаются (требование
-    пользователя). Возвращает список частей (чаще всего одна).
+    Верхняя часть — заголовок релиза + стадия, строка дат, счётчики.
+    Затем иерархия (требование пользователя):
+      • Разработчик — N задач
+        **Статус**            (в порядке приоритета статусов, STATUS_ORDER)
+        1) **номер** — название — разр. план / факт в релизе [стрелка] Всего X ч
+    Методологи не упоминаются (требование пользователя). Возвращает список
+    частей (чаще всего одна); деление — только по границам разработчиков,
+    иерархия и задача не разрываются.
     """
     tasks = release_tasks(conn, rel["release_name"])
     if not tasks:
@@ -413,40 +417,99 @@ def build_dev_stats_block(conn: sqlite3.Connection, rel: dict,
         f"Накат: {_fmt_d(rel.get('rollout_date'))}"
     )
 
-    # Агрегация по разработчику: задачи (дедупликация уже внутри release_tasks),
-    # план — development_plan задачи; факт — fact_dev (часы ИМЕННО этого релиза,
-    # task_effort_by_release), та же пара, что в еженедельном отчёте.
-    groups: dict[str, list[dict]] = {}
+    # Иерархия: разработчик → статус (приоритет из STATUS_ORDER) → задачи.
+    order = load_status_order()
+    idx = {s: i for i, s in enumerate(order)}
+    devs: dict[str, dict[str, list[dict]]] = {}
     for t in tasks:
-        groups.setdefault((t.get("programmer") or "").strip(), []).append(t)
-    names = sorted(groups, key=lambda n: (not n, n))  # алфавит, «не указан» в конце
+        dev = (t.get("programmer") or "").strip()
+        st = (t.get("last_status") or "").strip() or "(без статуса)"
+        devs.setdefault(dev, {}).setdefault(st, []).append(t)
+    names = sorted(devs, key=lambda n: (not n, n))  # алфавит, «не указан» в конце
 
-    lines: list[str] = []
+    header.append(f"👥 Разработчиков: {len(names)} | Задач (5 систем): {len(tasks)}")
+
+    blocks: list[list[str]] = []
     for name in names:
-        ts = groups[name]
-        n = len(ts)
-        plan = sum(t.get("development_plan") or 0 for t in ts)
-        fact_vals = [t["fact_dev"] for t in ts if t.get("fact_dev") is not None]
-        fact = sum(fact_vals) if fact_vals else None
-        who = f"**{name}**" if name else "*Разработчик не указан*"
-        lines.append(
-            f"• {who} — задач: {n}; {num_ru(plan)} / {num_ru(fact)} ч"
-            f"{labor_arrow(plan, fact)}"
-        )
+        n_tasks = sum(len(v) for v in devs[name].values())
+        block = [
+            f"• **{name}** — {n_tasks} задач"
+            if name else f"• *Разработчик не указан* — {n_tasks} задач"
+        ]
+        # Статусы в порядке приоритета (рост индекса STATUS_ORDER),
+        # «без статуса» — в конце. Внутри — задачи по номеру заявки.
+        statuses = sorted(devs[name], key=lambda s: (idx.get(s, 9999), s))
+        counter = 0
+        for st in statuses:
+            block.append(f"**{st}**")
+            for t in sorted(devs[name][st], key=lambda x: x["request_code"]):
+                counter += 1
+                plan, fact = t.get("development_plan"), t.get("fact_dev")
+                line = (
+                    f"{counter}) **{t['request_code']}** — {norm(t['request_name'])}"
+                    f" — разр. {num_ru(plan)} / {num_ru(fact)} ч"
+                    f"{labor_arrow(plan, fact)}"
+                )
+                # «Всего» — общий факт по задаче: только если осмыслен (есть,
+                # > 0 и отличается от факта релиза), иначе шум (правило weekly).
+                total = t.get("development_actual")
+                if total is not None and float(total) > 0 and (
+                    fact is None or round(float(total), 1) != round(float(fact), 1)
+                ):
+                    line += f" Всего {num_ru(total)} ч"
+                block.append(line)
+        blocks.append(block)
 
     total_plan = sum(t.get("development_plan") or 0 for t in tasks)
     tf = [t["fact_dev"] for t in tasks if t.get("fact_dev") is not None]
     total_fact = sum(tf) if tf else None
-    header.append(f"👥 Разработчиков: {len(names)} | Задач (5 систем): {len(tasks)}")
-    lines.append(
+    tail = [
         f"⏱ Итого: план {num_ru(total_plan)} / факт {num_ru(total_fact)} ч"
         f"{labor_arrow(total_plan, total_fact)}"
-    )
+    ]
 
-    msg = "\n".join(header + lines)
-    if len(msg) <= PART_LIMIT:
-        return [msg]
-    return chunk(msg, PART_LIMIT)
+    # Деление только по границам разработчиков (иерархия не разрывается);
+    # заголовок повторяется в продолжениях, итог — в конце последнего сообщения.
+    head = "\n".join(header)
+    first_line = header[0]
+    tail_mark = "\n(продолжение)"
+    tail_text = "\n".join(tail)
+
+    out: list[str] = []
+    cur = head
+
+    def flush() -> None:
+        nonlocal cur
+        if cur.strip():
+            out.append(cur)
+        cur = ""
+
+    for block in blocks:
+        text = "\n".join(block)
+        if len(cur) + 1 + len(text) <= PART_LIMIT:
+            cur += "\n" + text
+            continue
+        flush()
+        if len(text) + len(first_line) + len(tail_mark) + 2 > PART_LIMIT:
+            # Блок разработчика сам не влезает — режем по строкам (chunk).
+            for i, piece in enumerate(
+                chunk(text, PART_LIMIT - len(first_line) - len(tail_mark) - 2)
+            ):
+                pref = first_line + (tail_mark if (i or out) else "")
+                out.append(f"{pref}\n{piece}")
+            cur = ""
+        else:
+            cur = first_line + tail_mark + "\n" + text
+
+    # Итого — всегда в самом конце (в последнем сообщении).
+    if len(cur) + 1 + len(tail_text) > PART_LIMIT:
+        flush()
+        cur = first_line + tail_mark + "\n" + tail_text
+    else:
+        cur += "\n" + tail_text
+    if cur.strip():
+        out.append(cur)
+    return [p for p in out if p.strip()]
 
 
 def milestones_on(rel: dict, today: date) -> list[str]:
