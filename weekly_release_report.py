@@ -380,6 +380,75 @@ async def send_to_me(parts: list[str], chat_id: str = DEFAULT_CHAT_ID) -> None:
         await b.shutdown()
 
 
+# ── Статистика по разработчикам (контрольные точки) ───────────────────────
+# Требование пользователя: на контрольных точках «Начало тестирования» и
+# «Накат» отчёт = статистика по задачам, АГРЕГАЦИЯ ПО РАЗРАБОТЧИКАМ;
+# методологи в этом отчёте НЕ нужны (еженедельный отчёт понедельника остаётся
+# с расшифровкой по методологам).
+DEV_STATS_MILESTONES = ("Начало тестирования", "Накат")
+
+
+def build_dev_stats_block(conn: sqlite3.Connection, rel: dict,
+                          reasons: list[str] | None = None) -> list[str]:
+    """Сообщение-статистика по разработчикам на контрольной точке.
+
+    Состав: заголовок релиза + стадия, строка дат, количество разработчиков
+    и задач, затем по строке на разработчика (задач, план/факт часов со
+    стрелкой), в конце — итог. Методологи не упоминаются (требование
+    пользователя). Возвращает список частей (чаще всего одна).
+    """
+    tasks = release_tasks(conn, rel["release_name"])
+    if not tasks:
+        return []
+
+    header = [f"📊 **{rel['release_name']}** — стадия: *{rel['stage']}*"]
+    for reason in (reasons or []):
+        if reason.startswith("смена этапа: "):
+            label = reason.split(": ", 1)[1]
+            if label in DEV_STATS_MILESTONES:
+                header.append(f"🔔 **{label}** — сегодня")
+    header.append(
+        f"Разработка: {_fmt_d(rel.get('dev_start'))} → {_fmt_d(rel.get('dev_end'))} | "
+        f"Тест: {_fmt_d(rel.get('test_start'))} → {_fmt_d(rel.get('test_end'))} | "
+        f"Накат: {_fmt_d(rel.get('rollout_date'))}"
+    )
+
+    # Агрегация по разработчику: задачи (дедупликация уже внутри release_tasks),
+    # план — development_plan задачи; факт — fact_dev (часы ИМЕННО этого релиза,
+    # task_effort_by_release), та же пара, что в еженедельном отчёте.
+    groups: dict[str, list[dict]] = {}
+    for t in tasks:
+        groups.setdefault((t.get("programmer") or "").strip(), []).append(t)
+    names = sorted(groups, key=lambda n: (not n, n))  # алфавит, «не указан» в конце
+
+    lines: list[str] = []
+    for name in names:
+        ts = groups[name]
+        n = len(ts)
+        plan = sum(t.get("development_plan") or 0 for t in ts)
+        fact_vals = [t["fact_dev"] for t in ts if t.get("fact_dev") is not None]
+        fact = sum(fact_vals) if fact_vals else None
+        who = f"**{name}**" if name else "*Разработчик не указан*"
+        lines.append(
+            f"• {who} — задач: {n}; {num_ru(plan)} / {num_ru(fact)} ч"
+            f"{labor_arrow(plan, fact)}"
+        )
+
+    total_plan = sum(t.get("development_plan") or 0 for t in tasks)
+    tf = [t["fact_dev"] for t in tasks if t.get("fact_dev") is not None]
+    total_fact = sum(tf) if tf else None
+    header.append(f"👥 Разработчиков: {len(names)} | Задач (5 систем): {len(tasks)}")
+    lines.append(
+        f"⏱ Итого: план {num_ru(total_plan)} / факт {num_ru(total_fact)} ч"
+        f"{labor_arrow(total_plan, total_fact)}"
+    )
+
+    msg = "\n".join(header + lines)
+    if len(msg) <= PART_LIMIT:
+        return [msg]
+    return chunk(msg, PART_LIMIT)
+
+
 def milestones_on(rel: dict, today: date) -> list[str]:
     """Этапы, которые начинаются у релиза ИМЕННО сегодня.
 
@@ -514,7 +583,18 @@ def main() -> int:
 
         messages: list[str] = []
         for it in items:
-            messages.extend(build_release_block(conn, it["rel"], today, it["reasons"]))
+            # Выбор вида отчёта (требование пользователя):
+            #  • «Начало тестирования» / «Накат» — статистика по РАЗРАБОТЧИКАМ,
+            #    методологи не упоминаются;
+            #  • «Начало разработки» — прежний отчёт (расшифровка по методологам),
+            #    чтобы не терять деталь на старте;
+            #  • понедельник — еженедельный отчёт по методологам.
+            ms_reasons = [r for r in it["reasons"] if r.startswith("смена этапа: ")]
+            labels = {r.split(": ", 1)[1] for r in ms_reasons}
+            if labels & set(DEV_STATS_MILESTONES):
+                messages.extend(build_dev_stats_block(conn, it["rel"], it["reasons"]))
+            else:
+                messages.extend(build_release_block(conn, it["rel"], today, it["reasons"]))
     finally:
         conn.close()
 
