@@ -78,9 +78,39 @@ MILESTONES = (
     ("Накат", "rollout_date"),
 )
 
-# Получатель по умолчанию. Требование пользователя: отчёт приходит Марии Иванцевой
-# (личный чат 1C_INFO_BOT, HUID 7b5b… — чат создан ею самой).
-DEFAULT_CHAT_ID = "bb5766ee-85e5-016f-1902-fe182ae43e05"
+# ── Получатели: кому какой отчёт (требование пользователя 2026-09-23) ───────
+# Контрольные точки «Начало тестирования» / «Накат» → статистика по
+# РАЗРАБОТЧИКАМ, получатель — Анна Кондренко (Руководитель отдела,
+# «Отдел разработки систем 1С - 2»): она отвечает за разработчиков, чьи задачи
+# в отчёте. Анна написала боту 23.09.2026 — личный чат `a576efb8-…` появился
+# только поэтому: сам бот чаты создавать не может (BotX отвечает 403
+# `chat_creation_is_prohibited`), писать первым он не умеет — ждём её «стука».
+# Понедельник и «Начало разработки» → отчёт по МЕТОДОЛОГАМ, получатель —
+# Мария Иванцева («Отдел систем бухгалтерского и налогового учёта»).
+DEV_STATS_CHAT_ID = "a576efb8-c533-06f9-2912-8adafecd3490"   # Анна Кондренко
+METHODOLOGY_CHAT_ID = "bb5766ee-85e5-016f-1902-fe182ae43e05"  # Мария Иванцева
+DEFAULT_CHAT_ID = METHODOLOGY_CHAT_ID  # совместимость: прежний единственный получатель
+
+# Имена получателей — только для читаемых логов и dry-run.
+RECIPIENT_NAMES = {
+    DEV_STATS_CHAT_ID: "Анна Кондренко (разработка)",
+    METHODOLOGY_CHAT_ID: "Мария Иванцева (методологи)",
+}
+
+
+def who(chat_id: str) -> str:
+    """Человекочитаемое имя получателя для логов (иначе — сам chat_id)."""
+    return RECIPIENT_NAMES.get(str(chat_id), str(chat_id))
+
+
+def recipient_for(labels: set[str]) -> str:
+    """chat_id получателя по виду отчёта.
+
+    Контрольные точки «Начало тестирования» / «Накат» (статистика по
+    разработчикам) → Анна; всё остальное (еженедельный отчёт по методологам,
+    «Начало разработки») → Мария.
+    """
+    return DEV_STATS_CHAT_ID if labels & set(DEV_STATS_MILESTONES) else METHODOLOGY_CHAT_ID
 
 # Журнал отправок: ключ «релиз|дата» → отчёта по этому релизу в этот день не будет
 # повторно. Нужен, чтобы понедельник и смена этапа в один день не дали два отчёта.
@@ -544,27 +574,73 @@ def _prune_sent(data: dict, today: date) -> dict:
     cut = today - timedelta(days=SENT_LOG_KEEP_DAYS)
     keep = {}
     for key, when in data.items():
-        # Ключ: «релиз|YYYY-MM-DD» — дату берём из него, а не из значения.
-        ds = key.rsplit("|", 1)[-1]
-        try:
-            d = date.fromisoformat(ds)
-        except ValueError:
-            continue
-        if d >= cut:
+        # Ключ: «релиз|YYYY-MM-DD|вид» (старый формат без вида тоже принимаем) —
+        # дату ищем среди частей ключа, а не у значения.
+        d = None
+        for part in key.split("|"):
+            try:
+                d = date.fromisoformat(part)
+                break
+            except ValueError:
+                continue
+        if d is None or d >= cut:
             keep[key] = when
     return keep
 
 
-def mark_sent(releases: list[str], today: date) -> None:
-    """Отмечает, что отчёты по этим релизам за сегодня уже отправлены."""
+def mark_sent(keys: list[str], today: date) -> None:
+    """Отмечает, что отчёты с этими ключами журнала уже отправлены.
+
+    Ключи приходят готовыми («релиз|дата|вид») — вид отчёта в ключе нужен,
+    чтобы отчёт по разработчикам и отчёт по методологам по одному релизу
+    в один день не вытесняли друг друга (у них разные получатели).
+    """
     data = _prune_sent(load_sent(), today)
     stamp = datetime.now().isoformat(timespec="seconds")
-    for rel in releases:
-        data[f"{rel}|{today.isoformat()}"] = stamp
+    for key in keys:
+        data[key] = stamp
     SENT_LOG.parent.mkdir(parents=True, exist_ok=True)
     SENT_LOG.write_text(
         json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
     )
+
+
+def _fit(messages: list[str]) -> list[str]:
+    """Готовые сообщения → части ≤ PART_LIMIT.
+
+    `build_release_block` / `build_dev_stats_block` сами делят текст по границам
+    блоков, поэтому повторно дробить нельзя: часть ровно в PART_LIMIT символов
+    `chunk()` разрежет и оставит крошечный хвост-огрызок. Режем только то, что
+    реально превышает лимит.
+    """
+    parts: list[str] = []
+    for msg in messages:
+        if len(msg) <= PART_LIMIT:
+            parts.append(msg)
+        else:
+            parts.extend(chunk(msg, PART_LIMIT))
+    return [p for p in parts if p.strip()]
+
+
+def split_kinds(reasons: list[str]) -> dict[str, list[str]]:
+    """Разбивает поводы релиза по ВИДУ отчёта (у видов разные получатели).
+    «dev»         — контрольные точки «Начало тестирования» / «Накат»:
+                    статистика по разработчикам, получатель — Анна Кондренко;
+    «methodology» — понедельничный еженедельный отчёт и «Начало разработки»:
+                    расшифровка по методологам, получатель — Мария Иванцева.
+
+    Один релиз может дать оба вида (понедельник + смена этапа): тогда уходит
+    ДВА сообщения разным людям — каждому своё, и одно другое не вытесняет.
+    """
+    out: dict[str, list[str]] = {}
+    for reason in reasons:
+        if reason.startswith("смена этапа: "):
+            label = reason.split(": ", 1)[1]
+            kind = "dev" if label in DEV_STATS_MILESTONES else "methodology"
+        else:
+            kind = "methodology"
+        out.setdefault(kind, []).append(reason)
+    return out
 
 
 def decide(conn: sqlite3.Connection, today: date) -> list[dict]:
@@ -608,8 +684,9 @@ def main() -> int:
                     help="игнорировать журнал отправок (в т.ч. внеповодный прогон)")
     ap.add_argument("--all", action="store_true",
                     help="слать по всем активным релизам, даже без повода")
-    ap.add_argument("--chat-id", default=DEFAULT_CHAT_ID,
-                    help="chat_id личного чата получателя (по умолчанию Мария Иванцева)")
+    ap.add_argument("--chat-id", default=None,
+                    help="chat_id личного чата получателя; по умолчанию — "
+                         "автомаршрутизация (разработчики → Анна, методологи → Мария)")
     args = ap.parse_args()
 
     if not PORTFOLIO_DB.exists():
@@ -630,72 +707,86 @@ def main() -> int:
             items = [{"rel": r, "reasons": ["ручной прогон"]}
                      for r in load_active_releases(conn, today)]
 
-        if not args.force:
-            sent = load_sent()
-            fresh: list[dict] = []
-            for it in items:
-                name = it["rel"]["release_name"]
-                if f"{name}|{today.isoformat()}" in sent:
-                    print(f"⏭ {name}: отчёт за {today} уже отправлен — пропускаю")
-                else:
-                    fresh.append(it)
-            items = fresh
+        # Раскладываем поводы по ВИДАМ отчёта: у видов разные получатели.
+        # Дедупликация — по ключу «релиз|дата|вид», иначе отчёт по разработчикам
+        # и по методологам по одному релизу вытесняли бы друг друга.
+        sent = {} if args.force else load_sent()
+        jobs: dict[str, dict] = {}   # kind → {"chat_id":…, "items":[…]}
+        skipped: list[str] = []
+        for it in items:
+            name = it["rel"]["release_name"]
+            for kind, reasons in split_kinds(it["reasons"]).items():
+                key = f"{name}|{today.isoformat()}|{kind}"
+                if key in sent:
+                    skipped.append(f"{name} ({kind})")
+                    continue
+                job = jobs.setdefault(kind, {"kind": kind, "items": []})
+                job["items"].append({"rel": it["rel"], "reasons": reasons, "key": key})
 
-        if not items:
-            print("ℹ️ Поводов для отправки нет (ни понедельник, ни смена этапа) — молчу")
+        for s in skipped:
+            print(f"⏭ {s}: отчёт за {today} уже отправлен — пропускаю")
+
+        if not jobs:
+            print("ℹ️ Поводов для отправки нет (уже отправлено либо нет повода) — молчу")
             return 0
 
-        print("Поводы: " + "; ".join(
-            f"{it['rel']['release_name']} → {', '.join(it['reasons'])}" for it in items
-        ))
-
-        messages: list[str] = []
-        for it in items:
-            # Выбор вида отчёта (требование пользователя):
-            #  • «Начало тестирования» / «Накат» — статистика по РАЗРАБОТЧИКАМ,
-            #    методологи не упоминаются;
-            #  • «Начало разработки» — прежний отчёт (расшифровка по методологам),
-            #    чтобы не терять деталь на старте;
-            #  • понедельник — еженедельный отчёт по методологам.
-            ms_reasons = [r for r in it["reasons"] if r.startswith("смена этапа: ")]
-            labels = {r.split(": ", 1)[1] for r in ms_reasons}
-            if labels & set(DEV_STATS_MILESTONES):
-                messages.extend(build_dev_stats_block(conn, it["rel"], it["reasons"]))
-            else:
-                messages.extend(build_release_block(conn, it["rel"], today, it["reasons"]))
+        # Текст каждого вида отчёта (сборка под тем же conn — до его закрытия).
+        for job in jobs.values():
+            messages: list[str] = []
+            for it in job["items"]:
+                if job["kind"] == "dev":
+                    messages.extend(build_dev_stats_block(conn, it["rel"], it["reasons"]))
+                else:
+                    messages.extend(build_release_block(conn, it["rel"], today, it["reasons"]))
+            job["messages"] = messages
     finally:
         conn.close()
 
-    # Уже готовые сообщения (build_release_block сам делит по границам методологов).
-    # Повторно дробить нельзя: часть ровно в PART_LIMIT символов chunk() разрежет
-    # и оставит крошечный хвост-огрызок. Делим только то, что реально превышает лимит.
-    parts: list[str] = []
-    for msg in messages:
-        if len(msg) <= PART_LIMIT:
-            parts.append(msg)
-        else:
-            parts.extend(chunk(msg, PART_LIMIT))
-
-    if not parts:
-        print("ℹ️ По отобранным релизам нет задач по пяти системам — отправлять нечего")
-        return 0
+    # Кому какой вид отчёта. Явно заданный `--chat-id` перекрывает маршрутизацию
+    # (ручной/отладочный прогон в конкретный личный чат).
+    forced = bool(args.chat_id)
+    if forced:
+        for job in jobs.values():
+            job["chat_id"] = args.chat_id
+    else:
+        for kind, job in jobs.items():
+            labels = {r.split(": ", 1)[1] for r in
+                      [x for it in job["items"] for x in it["reasons"]]
+                      if r.startswith("смена этапа: ")}
+            job["chat_id"] = (DEV_STATS_CHAT_ID if kind == "dev"
+                              else METHODOLOGY_CHAT_ID)
+            if labels:
+                job["chat_id"] = recipient_for(labels)
 
     if args.dry_run:
-        for i, p in enumerate(parts, 1):
-            print("─" * 60)
-            print(f"— сообщение {i}/{len(parts)} ({len(p)} символов) —")
-            print(p)
-        print("─" * 60)
-        print(f"[dry-run] сообщений: {len(parts)}, символов: {sum(len(p) for p in parts)}")
+        for kind, job in jobs.items():
+            parts = _fit(job["messages"])
+            print("═" * 60)
+            print(f"[{kind}] получатель: {who(job['chat_id'])} — сообщений {len(parts)}")
+            for i, p in enumerate(parts, 1):
+                print("─" * 60)
+                print(f"— сообщение {i}/{len(parts)} ({len(p)} символов) —")
+                print(p)
+        total = sum(len(_fit(j["messages"])) for j in jobs.values())
+        print("═" * 60)
+        print(f"[dry-run] получателей: {len(jobs)}, сообщений всего: {total}")
         return 0
 
     import asyncio
 
-    asyncio.run(send_to_me(parts, args.chat_id))
-    # Журнал пишем только после успешной отправки — иначе при сбое отчёт
-    # потерялся бы навсегда (дедупликация съела бы следующий прогон).
-    mark_sent([it["rel"]["release_name"] for it in items], today)
-    print(f"✅ Отправлено в личный чат {args.chat_id}: сообщений {len(parts)}")
+    sent_keys: list[str] = []
+    for kind, job in jobs.items():
+        parts = _fit(job["messages"])
+        if not parts:
+            print(f"ℹ️ [{kind}] нет задач по пяти системам — {who(job['chat_id'])} не пишу")
+            continue
+        asyncio.run(send_to_me(parts, job["chat_id"]))
+        print(f"✅ [{kind}] → {who(job['chat_id'])}: сообщений {len(parts)}")
+        # Журнал пишем только после успешной отправки — иначе при сбое отчёт
+        # потерялся бы навсегда (дедупликация съела бы следующий прогон).
+        sent_keys.extend(it["key"] for it in job["items"])
+    if sent_keys:
+        mark_sent(sent_keys, today)
     return 0
 
 
