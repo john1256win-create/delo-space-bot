@@ -91,6 +91,38 @@ DEV_STATS_CHAT_ID = "a576efb8-c533-06f9-2912-8adafecd3490"   # Анна Конд
 METHODOLOGY_CHAT_ID = "bb5766ee-85e5-016f-1902-fe182ae43e05"  # Мария Иванцева
 DEFAULT_CHAT_ID = METHODOLOGY_CHAT_ID  # совместимость: прежний единственный получатель
 
+# Анне уходят отчёты ТОЛЬКО по этим семействам релизов (требование пользователя
+# 2026-09-23): «для Анны работать только с релизами, начинающимися с…».
+# Остальные (1С_SASCO, ERP_GP, 1С_RK …) на контрольных точках ей не отправляются.
+DEV_STATS_RELEASE_PREFIXES = ("1C_DT", "1С_UKD", "1С_TK")
+
+# В названиях релизов встречаются И кириллическая «С», И латинская «C»
+# (`1С_TK_v35.35` — кириллица, `1C_DT_v32.32` — латиница). Сравнивать префиксы
+# «как есть» нельзя: половина релизов не сматчится. Приводим к одному алфавиту.
+_HOMOGLYPHS = str.maketrans({
+    "C": "С", "c": "с", "A": "А", "a": "а", "E": "Е", "e": "е", "O": "О", "o": "о",
+    "P": "Р", "p": "р", "T": "Т", "X": "Х", "x": "х", "B": "В", "H": "Н", "K": "К",
+    "M": "М", "Y": "У", "y": "у",
+})
+
+
+def fold_release_name(name: str) -> str:
+    """Приводит название релиза к единому алфавиту для сравнения префиксов."""
+    return (name or "").translate(_HOMOGLYPHS).upper()
+
+
+_DEV_PREFIXES_FOLDED = tuple(fold_release_name(p) for p in DEV_STATS_RELEASE_PREFIXES)
+
+
+def is_dev_stats_release(name: str) -> bool:
+    """Попадает ли релиз в семейства, по которым отчёт уходит Анне.
+
+    Сравнение идёт по нормализованному имени, поэтому `1C_DT` (латинская «C»)
+    и `1С_TK` (кириллическая «С») матчатся одинаково надёжно.
+    """
+    folded = fold_release_name(name)
+    return any(folded.startswith(p) for p in _DEV_PREFIXES_FOLDED)
+
 # Имена получателей — только для читаемых логов и dry-run.
 RECIPIENT_NAMES = {
     DEV_STATS_CHAT_ID: "Анна Кондренко (разработка)",
@@ -713,9 +745,16 @@ def main() -> int:
         sent = {} if args.force else load_sent()
         jobs: dict[str, dict] = {}   # kind → {"chat_id":…, "items":[…]}
         skipped: list[str] = []
+        filtered: list[str] = []
         for it in items:
             name = it["rel"]["release_name"]
             for kind, reasons in split_kinds(it["reasons"]).items():
+                # Анне — только семейства 1C_DT / 1С_UKD / 1С_TK (требование
+                # пользователя). Методологический отчёт фильтром не затронут:
+                # Мария получает сводку по всем релизам.
+                if kind == "dev" and not is_dev_stats_release(name):
+                    filtered.append(f"{name} ({kind})")
+                    continue
                 key = f"{name}|{today.isoformat()}|{kind}"
                 if key in sent:
                     skipped.append(f"{name} ({kind})")
@@ -723,6 +762,9 @@ def main() -> int:
                 job = jobs.setdefault(kind, {"kind": kind, "items": []})
                 job["items"].append({"rel": it["rel"], "reasons": reasons, "key": key})
 
+        for f in filtered:
+            print(f"⏭ {f}: релиз вне семейств {', '.join(DEV_STATS_RELEASE_PREFIXES)} "
+                  f"— Анне не отправляю")
         for s in skipped:
             print(f"⏭ {s}: отчёт за {today} уже отправлен — пропускаю")
 
